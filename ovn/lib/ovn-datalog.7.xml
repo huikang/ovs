@@ -1,0 +1,491 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manpage program="ovn-datalog" section="7" title="ovn-datalog">
+
+<h1>Name</h1>
+<p>ovn-datalog -- Open Virtual Network Datalog</p>
+
+<h1>Synoposis</h1>
+<pre fixed="yes">
+#include "datalog.h"
+</pre>
+
+<pre fixed="yes">
+void* datalog_init(const char* <var>rules</var>, void* <var>ext_func</var>);
+void  datalog_free(void* <var>d</var>);
+void  datalog_opr(void* <var>d</var>, bool <var>query</var>);
+</pre>
+
+<pre fixed="yes">
+bool  datalog_put_table(void* <var>d</var>, bool <var>is_delete</var>, const char* <var>name</var>);
+void  datalog_put_field(void* <var>d</var>, void* <var>value</var>, int32_t <var>size</var>);
+</pre>
+
+<pre fixed="yes">
+bool  datalog_get_table(void* <var>d</var>, bool* <var>is_delete</var>, const char** <var>name</var>,
+    int32_t* <var>n_tuples</var>, int32_t* <var>n_fields</var>);
+bool  datalog_get_field(void* <var>d</var>, void** <var>value</var>, int32_t* <var>size</var>);
+</pre>
+
+<h1>Description</h1>
+
+<p>
+The datalog_init() initializes an instance of datalog engine. <dfn>rules</dfn>
+ indicates the datalog program. <dfn>ext_func</dfn>, which is optional, will
+specify the external function of the engine.
+</p>
+
+<p>
+Each instance of engine is defined by its program, its state, and temporary
+data for input and output tables. The state consists of table content of all
+input tables and intermediate tables.
+</p>
+
+<p>
+Datalog engine works in pipeline manner. Input table is constructed by first
+calling the function datalog_put_table(), then followed by a serial of function
+calls of datalog_put_field(). Data are streamed field by field, then tuple by
+tuple. <dfn>name</dfn> indicates the name of table. <dfn>is_remove</dfn>
+indicates whether the tuples constructed by subsequent calls of
+datalog_put_field() are for addition or for deletion.
+</p>
+
+<p>
+To provision multiple tables, the above sequence should be applied on each input
+table. datalog_put_table() could be called at most twice for each table, one for
+addition and one for deletion.
+</p>
+
+<p>
+Output tables are retrieved in similar manner.
+</p>
+<p>
+<dfn>size</dfn> could be 0 for null-terminated string. When value of a field
+is an arbitrary byte array, <dfn>size</dfn> must indicate the length of the
+array.
+</p>
+
+<p>
+Input tables are temporarily buffered in datalog engine instance and will be
+cleared once the operation is performed by calling datalog_opr(). Output tables
+are temporarily buffered in datalog engine instance and will be cleared once all
+output tables are retrieved.
+</p>
+
+<p>
+Value will never be changed or referred to by the engine after calling the
+function datalog_put_field(). Value obtained from output table is a reference
+to data inside the engine and should never be changed. The value is valid as
+long as some tuple still holds that value.
+</p>
+<p>
+The engine implements two operations:
+</p>
+
+<ul>
+<li>
+Incremental change. The input is a set of tables, each containing a set of
+tuples. The output is incremental change of tables caused by the incremental
+change of input.
+</li>
+
+<li>
+Table query. Each tuple specifies one query condition. For each field of tuple,
+NULL indicates the value is not used for matching; non NULL value indicates that
+only tuples that match the field value will be retrieved. The output is the set
+of tables, each of which is the query result of one query condition. Query
+cannot be applied on output table.
+</li>
+</ul>
+
+<p>
+The behavior is undefined if incomplete tuples are provisioned or retrieved.
+</p>
+
+<p>
+The usage of external function is illustrated in the NOTES section.
+</p>
+
+<p>
+Example:
+</p>
+
+<pre fixed="yes">
+void* d = datalog_init("R2(a,b):r2(a,b);R1(a):r1(a).",
+    /* external function not provided */ NULL);
+</pre>
+
+<pre fixed="yes">
+datalog_put_table(d, /* adding tuple */ false, "r1");
+datalog_put_field(d, "r1_a", 0); /* 1st field of 1st tuple for r1 */
+datalog_put_table(d, false, "r2");
+datalog_put_field(d, "r2_a", /* c-str */ 0);/* 1st field of 1st tuple */
+datalog_put_field(d, "r2_b", /* len */ 4); /* 2nd field of 1st tuple */
+</pre>
+
+<pre fixed="yes">
+datalog_opr(d, /* change */ false); /* run the engine */
+</pre>
+
+<pre fixed="yes">
+/* get the 1st table, assume it is R2 */
+datalog_get_table(d, delete, name, n_tuples, n_fields);
+datalog_get_field(d, value, sz); /* 1st field of 1st tuple */
+datalog_get_field(d, value, sz); /* 2nd field of 1st tuple */
+/* get the 2nd table, assume it is R1 */
+datalog_get_table(d, delete, name, n_tuples, n_fields);
+datalog_get_field(d, value, sz); /* 1st field of 1st tuple */
+</pre>
+
+<pre fixed="yes">
+datalog_free(d);
+</pre>
+
+<h1>RETURN VALUE</h1>
+
+<p>
+datalog_init() returns a handle to the engine instance. The handle will be
+used in all other calls. If there is error in the data log program,
+datalog_init will call exit(1).
+</p>
+
+<p>
+datalog_put_table() returns false if the specified table name is invalid.
+datalog_get_table() returns false if there is no more table content to retrieve.
+datalog_get_field() returns false if all fields of all tuples of the table
+have been retrieved. The last invocation could be skipped since the number
+of tuples is known after calling datalog_get_table().
+</p>
+
+<p>
+The output parameter <dfn>n_tuples</dfn> indicates the number of tuples in the
+table and <dfn>n_fields</dfn> indicates the number of fields for each tuple.
+<dfn>size</dfn> does not include NULL character for null terminated string.
+</p>
+
+<h1>NOTES</h1>
+<p>
+The following sections define the syntax, semantics, and run time behavior
+of the OVN datalog program.
+</p>
+
+<h2>SYNTAX OF OVN DATALOG</h2>
+
+<pre fixed="yes">
+&lt;token&gt;          ::= [_a-zA-Z][_a-zA-Z0-9]*
+&lt;literal&gt;        ::= '[^']*'
+</pre>
+
+<p>
+Literals are enclosed with single quote and can extend to multiple lines.
+Comments start with pound character and end in line end. Blank characters are
+ignored. Tokens are case sensitive.
+</p>
+
+<pre fixed="yes">
+&lt;table name&gt;     ::= &lt;token&gt;
+&lt;field name&gt;     ::= &lt;token&gt;
+
+&lt;field&gt;          ::= &lt;field name&gt; | &lt;literal&gt; | "-"
+&lt;field list&gt;     ::= &lt;field&gt; | &lt;field list&gt; "," &lt;field&gt;
+
+&lt;table&gt;          ::= &lt;table name&gt; "(" &lt;field list&gt; ")"
+&lt;table list&gt;     ::= &lt;table&gt; | &lt;table list&gt; &lt;table&gt;
+
+&lt;join table&gt;     ::= &lt;table&gt; ":" &lt;table list&gt;
+&lt;union table&gt;    ::= &lt;table&gt; "&gt;" &lt;table list&gt;
+
+&lt;rule&gt;           ::= &lt;join table&gt; | &lt;union table&gt;
+&lt;rule list&gt;      ::= &lt;rule&gt; | &lt;rule list&gt; ";" &lt;rule&gt;
+&lt;program&gt;        ::= &lt;rule list&gt; "."
+</pre>
+
+<p>
+Example:
+</p>
+
+<pre>
+        Aa2(a) : a1(a, 'aa', -);
+        A3(a, 'bb') : Aa2(a) a1(a, -, b) Aa2(b);
+        A4(x, y) &gt; Aa3(x, y) a2(y, x).
+</pre>
+
+<p>
+Each tuple is an ordered set of field values. Field name is only used for
+specifying matching criteria. All tuples from a table have the same number
+of fields. The field "-" is called 'ignored' field.
+</p>
+
+<p>
+For each rule, the content of left side table, e.g., Aa2 in the above example,
+is determined by the content of all right side tables, e.g., a1 in the above
+example. Table could appear in left side at most once.
+</p>
+
+<p>
+When a table only appears in right side, it is called input table. When a
+table only appears in left side, it is called output table. When a table
+appears in both left side and right side, it is called intermediate table.
+</p>
+
+<p>
+Input tables must use all lower case names. Output tables must use all upper
+case names. Intermediate tables must use both upper case and lower case in its
+name. The right side of any rule could only have one table that appears twice.
+Recursion is not supported, as showed below.
+</p>
+
+<pre>
+
+        Transitive(x,z) : relation(x,y) relation(y,z);
+        Transitive(x,z) : relation(x,y) Transitive(y,z);
+        TRANSITIVE(x,y) : Transitive(x, y).
+</pre>
+
+<p>
+OVN datalog program implements two operations.
+</p>
+
+<ul>
+<li>
+Union. The content of left side table is the union of content of all right
+side tables. No literal or 'ignore' field is allowed for rule of union.
+</li>
+
+<li>
+<p>
+Join. The content of left side table is the 'join' of all right side
+tables. Joining produces its result in 4 steps illustrated below.
+</p>
+</li>
+</ul>
+
+<pre fixed="yes">
+                                                     Step 1
+Example:              u(a,b)       v(x,y)       u(a,b)  v(x,y)
+                     +---+---+    +---+---+    +---+---+---+---+
+C(a,c):              | 1 | 2 |    | 2 | 3 |    | 1 | 2 | 2 | 3 |
+  u(a,b)             +---+---+    +---+---+    +---+---+---+---+
+  v(b,c).            | 1 | 3 |    | 2 | 4 | =&gt; | 1 | 2 | 2 | 4 |
+                     +---+---+    +---+---+    +---+---+---+---+
+                                  | 3 | 3 |    | 1 | 2 | 3 | 3 |
+                                  +---+---+    +---+---+---+---+
+                                               | 1 | 3 | 2 | 3 |
+ Step 4        Step 3           Step 2         +---+---+---+---+
+ C(a,c)      u(a) v(y)     u(a,b)  v(x,y)      | 1 | 3 | 2 | 4 |
++---+---+    +---+---+    +---+---+---+---+    +---+---+---+---+
+| 1 | 3 |    | 1 | 3 |    | 1 | 2 | 2 | 3 |    | 1 | 3 | 3 | 3 |
++---+---+    +---+---+    +---+---+---+---+    +---+---+---+---+
+| 1 | 4 | &lt;= | 1 | 4 | &lt;= | 1 | 2 | 2 | 4 | &lt;=    u.b == v.x
++---+---+    +---+---+    +---+---+---+---+    matching criteria
+             | 1 | 3 |    | 1 | 3 | 3 | 3 |
+             +---+---+    +---+---+---+---+
+</pre>
+
+<pre>
+Step 1: Perform full join operation over all right side tables.
+Step 2: Filter the result tuple set based on matching criteria.
+Step 3: Drop the fields that do no appear in left side table.
+Step 4: Merge duplicate tuples and reorder fields.
+</pre>
+
+<p>
+When literal appears in right side table, it indicates to only include
+those tuples whose specified field matches the literal. When it appears
+in left side table, that value is always provisioned on the specified
+field.
+</p>
+
+<p>
+'Ignored' field indicates that the specified field is neither used
+in matching criteria, nor appearing in the left side table.
+'Ignored' field never appears in left side table.
+</p>
+
+<p>
+The engine works in incremental computation manner, i.e., the engine only
+accepts incremental change for a set of input tables, and it will
+compute the incremental change of output tables. The change is in form of
+adding tuples or deleting tuples.
+</p>
+
+<p>
+Example: assume initially,
+</p>
+<pre>
+        u(a,b) contains { (1, 2), (1, 3) },
+        v(x,y) contains { (2, 3), (1, 3) }; then
+        C(a,c) contains { (1, 3) }
+</pre>
+<p>
+If { (2, 4) } is added to v(x,y), the engine will output { (1, 4) }, making
+the current state of C(a,c) as { (1, 3), (1, 4) }.
+</p>
+
+<h2>METHOD OF COMPUTATION</h2>
+<p>
+The test case Test_interactive is an interactive tool that shows the usage
+of the engine.
+</p>
+
+<p>
+The following steps are performed when the engine is initialized:
+</p>
+<p>
+1. Parse the program.
+</p>
+<p>
+2. Do topology sort on tables, assuming left side table depend on right side
+tables. The sort will fail if there is circular dependency (recursion).
+</p>
+<p>
+2. Name the tables and fields by numbers. Table number reflects its topology
+order. Rules are rewritten using numbers and saved in rule set.
+</p>
+<p>
+3. Create empty table for all input tables and intermediate tables.
+</p>
+<p>
+All values of tuple fields used in the engine is kept in a value
+dictionary and values will only be accessed through references.
+</p>
+<p>
+For input table and intermediate table, indexes will be automatically created
+when joining operation is performed. Assume there is rule:
+</p>
+<pre fixed="yes">
+        A(x, k) : a1(x, y), a1(x, z), a2(y, z, k)
+</pre>
+
+<p>
+Index (a1.x) and (a2.y, a2.z) will be created. One table may have multiple
+indexes. In this example, a1 is 'self join' since it appears twice on right side.
+</p>
+<p>
+Each tuple from left side table has a reference count. It indicates
+the number of duplicate tuples that are generated after full join and
+criteria matching. (1, 3) from C(a, c) will have count 2 in the above example.
+</p>
+<p>
+The following steps are performed for change operation:
+</p>
+<p>
+1. Input tables are normalized, i.e., if there is addition of existing tuple
+or deletion of non existing tuple, the tuple is ignored, but multiple addition
+or deletion within an input table is not examined.
+
+</p>
+<p>
+2. The addition table and deletion table are paired, i.e., for the change set,
+if there is only addition table +T, an empty table is generated for the same
+table as -T, and vice versa. The output is array of table of changes:
+({-T1, +T1}, {-T2, +T2}, ..., {-Tn, +Tn})
+</p>
+<p>
+3. Sort the array based on table number.
+</p>
+<pre fixed="yes">
+4. While the array is not empty:
+4.1 Remove the first item from the array, denote it as -T, +T.
+4.2 Create a copy of -T, +T, but set its tuple reference count to 1.
+4.3 For all rules that has T in right side:
+4.3.1 Check if the rule could be computed by external function.
+4.3.2 If yes, invoke external rule function with -T and +T respectively.
+4.3.3 If not and the rule is union, do union with -T and +T respectively.
+4.3.4 If not and the rule is join, do join with -T and +T respectively.
+4.3.5 Merge the output of above operation to left side table.
+4.3.6 If the last step generates new -T' and +T', insert it to the
+            change array based on its table number.
+4.4 Merge -T and +T to original table respectively.
+</pre>
+<p>
+Merging operation is based on tuple's reference count. For a left side table,
+when a tuple is first seen or a tuple's count decreases to 0, that tuple is
+added to the new incremental change table. The reference count for right side
+table is always regarded as 1.
+</p>
+<p>
+Joining is performed as below. Tuple field reordering is carried out as
+indicated by the rule.
+</p>
+<p>
+1. If the table to be joined involves self join, it is calculated first. The
+incremental change is
+</p>
+<pre>
+        ((dT)X(T)) V ((T)X(dT)) V ((dT)X(dT))
+</pre>
+<p>
+dT denotes incremental change of T. X denotes join, and V denotes union.
+Otherwise, use the table itself as input to step 2.
+</p>
+<p>
+2. Choose the table with smallest number of tuples that 'conditionally joins'
+    with above result. Join the two tables and drop fields that are no longer
+    needed. Repeat the step until there is no conditional join. Conditionally
+    join means that the two tables have same field name, so field matching must
+    be performed first.
+</p>
+<p>
+3. Join with all remaining tables. This is called 'full join'.
+</p>
+<h2>USE OF EXTERNAL FUNCTION</h2>
+<p>
+Join and union operation can never generate new values. When there is a need
+to generate new values for a field, external function should be defined.
+</p>
+
+<p>
+For example, to generate an unique id for each tuple in a(x, y, z), the
+following rule is defined but its implementation is in the external function.
+</p>
+<pre>
+        B(id, x, y, z) : a(x, y, z) generated_id(id).
+</pre>
+<p>
+generated_id is a dummy table to make the rule correct.
+</p>
+<p>
+Another example is that given right side table a(x, y), the left side table
+B(x, y) is defined as having one tuple for each x from (x, y), such that whose
+second field is an array of of all values of y for (x, y) in a(x, y). Assume:
+</p>
+<pre>
+
+        a is { (1, 1), (1, 2), (2, 3) }, then
+        B is { (1, '1, 2'), (2, '3') }
+</pre>
+<p>
+Not all kinds of computation could be implemented with external function. The
+restriction is that the incremental change of left side table should never depend on
+the order of application of incremental change on right side tables.
+</p>
+<p>
+External function is defined as
+</p>
+<pre fixed="yes">
+        bool (*ext_func)(
+            log_engine_t* d, log_table_t* right,
+            log_table_t* left_delete, log_table_t* left_add);
+</pre>
+<p>
+External function is always invoked before doing join or union. The function
+must return false if the given table must be computed by union or join
+operation. <dfn>right</dfn> denotes the change of some table in right side, either
+addition or deletion. <dfn>left_delete</dfn> and <dfn>left_add</dfn> is empty when
+the function is invoked and should be provisioned during invocation.
+</p>
+<p>
+External function may keep state for its computation. After datalog_opr()
+finishes, the function is called with:
+</p>
+<pre fixed="yes">
+        (*ext_func)(d, NULL, NULL, NULL);
+</pre>
+<p>
+which could be used to reset its state.
+</p>
+<p>
+External function should only be used when union and join do not suffice.
+OVN datalog internal APIs must be used to do the computation.
+</p>
+</manpage>

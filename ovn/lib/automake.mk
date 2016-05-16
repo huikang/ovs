@@ -45,3 +45,6 @@ ovn/lib/ovn-nb-idl.ovsidl: $(OVN_NB_IDL_FILES)
 	$(AM_V_GEN)$(OVSDB_IDLC) annotate $(OVN_NB_IDL_FILES) > $@.tmp && \
 	mv $@.tmp $@
 
+man_MANS += ovn/lib/ovn-datalog.7
+EXTRA_DIST += ovn/lib/ovn-datalog.7.xml
+DISTCLEANFILES += ovn/lib/ovn-datalog.7
