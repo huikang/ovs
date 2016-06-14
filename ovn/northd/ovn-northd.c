@@ -53,6 +53,11 @@ struct northd_context {
     struct ovsdb_idl_txn *ovnsb_txn;
 };
 
+/* Persisted both2 list and ports2 */
+static bool persist = false;
+struct hmap ports2;
+struct ovs_list both2;
+
 static const char *ovnnb_db;
 static const char *ovnsb_db;
 
@@ -151,6 +156,14 @@ enum ovn_stage {
 #define REGBIT_CONNTRACK_COMMIT "reg0[1]"
 #define REGBIT_CONNTRACK_NAT    "reg0[2]"
 #define REGBIT_DHCP_OPTS_RESULT "reg0[3]"
+
+inline uint64_t
+rdtsc()
+{
+    uint32_t low, high;
+    asm volatile ("rdtsc" : "=a" (low), "=d" (high));
+    return (uint64_t)high << 32 | low;
+}
 
 /* Returns an "enum ovn_stage" built from the arguments. */
 static enum ovn_stage
@@ -262,7 +275,8 @@ allocate_tnlid(struct hmap *set, const char *name, uint32_t max,
                uint32_t *hint)
 {
     for (uint32_t tnlid = *hint + 1; tnlid != *hint;
-         tnlid = tnlid + 1 <= max ? tnlid + 1 : 1) {
+        tnlid = tnlid + 1 <= max ? tnlid + 1 : 1) {
+
         if (!tnlid_in_use(set, tnlid)) {
             add_tnlid(set, tnlid);
             *hint = tnlid;
@@ -573,6 +587,8 @@ struct ovn_port {
     struct ovn_datapath *od;
 
     struct ovs_list list;       /* In list of similar records. */
+
+    bool *up;                   /* set to True, if chassis is bounded */
 };
 
 static struct ovn_port *
@@ -591,7 +607,9 @@ ovn_port_create(struct hmap *ports, const char *key,
     op->sb = sb;
     op->nbsp = nbsp;
     op->nbrp = nbrp;
+    op->up = false;
     hmap_insert(ports, &op->key_node, hash_string(op->key, 0));
+    // VLOG_INFO("Allocating lport %s\n", op->key);
     return op;
 }
 
@@ -953,17 +971,25 @@ join_logical_ports(struct northd_context *ctx,
                    struct ovs_list *sb_only, struct ovs_list *nb_only,
                    struct ovs_list *both)
 {
+    uint32_t count;
+    uint64_t start, t_build_ports;
+
     hmap_init(ports);
     ovs_list_init(sb_only);
     ovs_list_init(nb_only);
     ovs_list_init(both);
 
     const struct sbrec_port_binding *sb;
+    count = 0;
+    // start = rdtsc();
     SBREC_PORT_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
         struct ovn_port *op = ovn_port_create(ports, sb->logical_port,
                                               NULL, NULL, sb);
         ovs_list_push_back(sb_only, &op->list);
+        count++;
     }
+    // t_build_ports = rdtsc() - start;
+    // VLOG_WARN("Allocated ports time:,\t%d,%16ld,\n", count, t_build_ports);
 
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
@@ -1196,6 +1222,118 @@ ovn_port_update_sbrec(const struct ovn_port *op)
     }
 }
 
+static void
+build_ports2(struct northd_context *ctx, struct hmap *datapaths,
+             struct hmap *ports2, struct ovs_list *both2)
+{
+    struct hmap sb_only_ports, nb_only_ports;
+    struct ovs_list sb_only, nb_only;
+    struct ovn_port *op, *next;
+    ovs_list_init(&sb_only);
+    ovs_list_init(&nb_only);
+
+    hmap_init(&sb_only_ports);
+    hmap_init(&nb_only_ports);
+
+    /*
+     * For each entry in sb port_binding table
+     * - if found in both list; point op->sb to this entry
+     * - if not found in both list; create an op and push it in the sb_only list
+     */
+    const struct sbrec_port_binding *sb;
+    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
+        op = ovn_port_find(ports2, sb->logical_port);
+        if (op) {
+            op->sb = sb;
+        } else {
+            /* not found in both list, create op in sb_only_list */
+            op = ovn_port_create(&sb_only_ports, sb->logical_port, NULL, NULL, sb);
+            ovs_list_push_back(&sb_only, &op->list);
+        }
+    }
+
+    /*
+     * - For each port known via the nb db:
+     *    - if the entry is found in the both list, update the nb data contained
+     *          in the entry, set op->nbs to the entry
+     *    - if the entry is not in the both list, but is in the sb_only
+     *          list, move the entry from the sb_list to the both list
+     *    - if the entry is not in either the both or the sb_only list,
+     *          create a new entry in the nb_only list
+     */
+    struct ovn_datapath *od;
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        if (od->nbs) {
+            for (size_t i = 0; i < od->nbs->n_ports; i++) {
+                const struct nbrec_logical_switch_port *nbs = od->nbs->ports[i];
+                op = ovn_port_find(ports2, nbs->name);
+                if (op) {
+      	            /* since the port found the both list, setup nbs and sb for op */
+                    op->nbsp = nbs;
+                } else {
+                    op = ovn_port_find(&sb_only_ports, nbs->name);
+                    if (op) {
+                        op->nbsp = nbs;
+                        ovs_list_remove(&op->list);
+                        ovs_list_push_back(both2, &op->list);
+                    } else {
+                        /* Create a new entry in the nb_only list */
+                        op = ovn_port_create(&nb_only_ports, nbs->name, nbs, NULL, NULL);
+                        ovs_list_push_back(&nb_only, &op->list);
+		    }
+		}
+                // datapath assignment
+                op->od = od;
+            }
+        } else {
+	}
+    }
+
+    /*
+     * For each entry in the both list, do modifications to align the port
+     * binding with nb information. (only for those change in nb scanning)
+     */
+    LIST_FOR_EACH_SAFE (op, next, list, both2) {
+
+        add_tnlid(&op->od->port_tnlids, op->sb->tunnel_key);
+        if (op->sb->tunnel_key > op->od->port_key_hint) {
+            op->od->port_key_hint = op->sb->tunnel_key;
+        }
+    }
+
+    /*
+     * For each entry in the nb_only list, create port_binding information the
+     * sb db and move the entry from the nb_only to the both list
+     */
+    // VLOG_INFO("----> Add mismatched northbound record to sb port_binding "
+    //          "and add to both list\n");
+    LIST_FOR_EACH_SAFE (op, next, list, &nb_only) {
+        uint16_t tunnel_key = ovn_port_allocate_key(op->od);
+        if (!tunnel_key) {
+            continue;
+        }
+
+        op->sb = sbrec_port_binding_insert(ctx->ovnsb_txn);
+        ovn_port_update_sbrec(op);
+
+        sbrec_port_binding_set_logical_port(op->sb, op->key);
+        sbrec_port_binding_set_tunnel_key(op->sb, tunnel_key);
+        // op->sb_tnl_key = tunnel_key;
+
+        ovs_list_remove(&op->list);
+        ovs_list_push_back(both2, &op->list);
+
+	hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));
+    }
+
+    /* For each entry in the sb_only list, remove from the port_binding table */
+    /*
+    HMAP_FOR_EACH_POP(hash_node, node, &sb_hmap) {
+        free(hash_node);
+    }
+    hmap_destroy(&sb_hmap); */
+}
+
 /* Updates the southbound Port_Binding table so that it contains the logical
  * switch ports specified by the northbound database.
  *
@@ -1217,6 +1355,7 @@ build_ports(struct northd_context *ctx, struct hmap *datapaths,
         ovn_port_update_sbrec(op);
 
         add_tnlid(&op->od->port_tnlids, op->sb->tunnel_key);
+
         if (op->sb->tunnel_key > op->od->port_key_hint) {
             op->od->port_key_hint = op->sb->tunnel_key;
         }
@@ -1228,6 +1367,8 @@ build_ports(struct northd_context *ctx, struct hmap *datapaths,
         if (!tunnel_key) {
             continue;
         }
+        VLOG_INFO("\t----> Insert nb port %s\n", op->key);
+	VLOG_INFO("\t\t----> tunnel_key: %d\n", tunnel_key);
 
         op->sb = sbrec_port_binding_insert(ctx->ovnsb_txn);
         ovn_port_update_sbrec(op);
@@ -1243,7 +1384,7 @@ build_ports(struct northd_context *ctx, struct hmap *datapaths,
         ovn_port_destroy(ports, op);
     }
 }
-
+
 #define OVN_MIN_MULTICAST 32768
 #define OVN_MAX_MULTICAST 65535
 
@@ -3816,16 +3957,64 @@ sync_address_sets(struct northd_context *ctx)
 }
 
 static void
+ovn_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop,
+                                       struct hmap *ports2,
+                                       struct ovs_list *both2)
+{
+    uint64_t start, t_build_ports;
+    if (!ctx->ovnsb_txn || !ovsdb_idl_has_ever_connected(ctx->ovnnb_idl)) {
+        return;
+    }
+
+    struct hmap datapaths;
+    build_datapaths(ctx, &datapaths);
+
+    start = rdtsc();
+    build_ports2(ctx, &datapaths, ports2, both2);
+    t_build_ports = rdtsc() - start;
+    VLOG_WARN("Cycle build_ports2():,\t%16ld,\n", t_build_ports);
+    build_ipam(ctx, &datapaths, ports2);
+    build_lflows(ctx, &datapaths, ports2);
+
+    sync_address_sets(ctx);
+
+    struct ovn_datapath *dp, *next_dp;
+    HMAP_FOR_EACH_SAFE (dp, next_dp, key_node, &datapaths) {
+        ovn_datapath_destroy(&datapaths, dp);
+    }
+    hmap_destroy(&datapaths);
+
+    /* Copy nb_cfg from northbound to southbound database.
+     *
+     * Also set up to update sb_cfg once our southbound transaction commits. */
+    const struct nbrec_nb_global *nb = nbrec_nb_global_first(ctx->ovnnb_idl);
+    const struct sbrec_sb_global *sb = sbrec_sb_global_first(ctx->ovnsb_idl);
+    if (nb && sb) {
+      sbrec_sb_global_set_nb_cfg(sb, nb->nb_cfg);
+      sb_loop->next_cfg = nb->nb_cfg;
+    }
+
+    cleanup_macam(&macam);
+}
+
+static void
 ovnnb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
 {
     if (!ctx->ovnsb_txn || !ovsdb_idl_has_ever_connected(ctx->ovnnb_idl)) {
         return;
     }
+
+    uint64_t start, t_build_ports;
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
+
+    start = rdtsc();
     build_ports(ctx, &datapaths, &ports);
-    build_ipam(ctx, &datapaths, &ports);
+    t_build_ports = rdtsc() - start;
+    VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
     build_lflows(ctx, &datapaths, &ports);
+    VLOG_INFO("Done build_lflows\n");
+    build_ipam(ctx, &datapaths, &ports);
 
     sync_address_sets(ctx);
 
@@ -4044,6 +4233,7 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     static const struct option long_options[] = {
         {"ovnsb-db", required_argument, NULL, 'd'},
         {"ovnnb-db", required_argument, NULL, 'D'},
+	{"persist", no_argument, NULL, 'q'},
         {"help", no_argument, NULL, 'h'},
         {"options", no_argument, NULL, 'o'},
         {"version", no_argument, NULL, 'V'},
@@ -4073,6 +4263,10 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
         case 'D':
             ovnnb_db = optarg;
+            break;
+
+	case 'q':
+            persist = true;
             break;
 
         case 'h':
@@ -4111,6 +4305,27 @@ add_column_noalert(struct ovsdb_idl *idl,
     ovsdb_idl_omit_alert(idl, column);
 }
 
+static void
+test_rdtsc()
+{
+    uint64_t start;
+    uint64_t end;
+    int base, i, tmp;
+
+    /* profiling period */
+    start = rdtsc();
+    for (base = 0; base < 30; base++) {
+      for (i = base; i < 40; i+=1) {
+	tmp = tmp + 1;
+      }
+    }
+
+    end = rdtsc();
+
+    VLOG_WARN("Elapsed cycles: %10ld\n", (end - start));
+    // printf("Elapsed cycles: %10ld\n", (end - start));
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -4118,7 +4333,10 @@ main(int argc, char *argv[])
     struct unixctl_server *unixctl;
     int retval;
     bool exiting;
+    uint64_t start;
+    uint64_t end, t_nb, t_sb, t_commit;
 
+    t_nb = t_sb = t_commit = 0;
     fatal_ignore_sigpipe();
     set_program_name(argv[0]);
     service_start(&argc, &argv);
@@ -4185,11 +4403,20 @@ main(int argc, char *argv[])
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_type);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_options);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_mac);
-    ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
     ovsdb_idl_add_table(ovnsb_idl_loop.idl, &sbrec_table_dhcp_options);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_dhcp_options_col_code);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_dhcp_options_col_type);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_dhcp_options_col_name);
+
+    if (persist) {
+        // Only track the chassis column in Port_binding
+        ovsdb_idl_track_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
+
+        hmap_init(&ports2);
+        ovs_list_init(&both2);
+    } else {
+        ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
+    }
 
     ovsdb_idl_add_table(ovnsb_idl_loop.idl, &sbrec_table_address_set);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_address_set_col_name);
@@ -4199,8 +4426,14 @@ main(int argc, char *argv[])
     ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_chassis_col_nb_cfg);
 
     /* Main loop. */
+    if (persist) {
+        VLOG_WARN("Persist set\n\n");
+    } else {
+        VLOG_WARN("Persist NOT set\n\n");
+    }
     exiting = false;
     while (!exiting) {
+        VLOG_WARN("+++++++++++++++++++++++++++++\n\n");
         struct northd_context ctx = {
             .ovnnb_idl = ovnnb_idl_loop.idl,
             .ovnnb_txn = ovsdb_idl_loop_run(&ovnnb_idl_loop),
@@ -4208,8 +4441,22 @@ main(int argc, char *argv[])
             .ovnsb_txn = ovsdb_idl_loop_run(&ovnsb_idl_loop),
         };
 
-        ovnnb_db_run(&ctx, &ovnsb_idl_loop);
+        if (persist) {
+            start = rdtsc();
+            ovn_db_run(&ctx, &ovnsb_idl_loop, &ports2, &both2);
+            end = rdtsc();
+            t_nb = end - start;
+        } else {
+            start = rdtsc();
+            ovnnb_db_run(&ctx, &ovnsb_idl_loop);
+            end = rdtsc();
+            t_nb = end - start;
+        }
+
+        start = rdtsc();
         ovnsb_db_run(&ctx, &ovnsb_idl_loop);
+        end = rdtsc();
+        t_sb = end - start;
         if (ctx.ovnsb_txn) {
             check_and_add_supported_dhcp_opts_to_sb_db(&ctx);
         }
@@ -4221,13 +4468,27 @@ main(int argc, char *argv[])
         }
         ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
+        end = rdtsc();
+        t_commit = end - start;
 
+        VLOG_WARN("Starting poll_block\n");
         poll_block();
         if (should_service_stop()) {
             exiting = true;
         }
+
+        // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
+        VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
+                  t_commit);
+
+        if (persist) {
+            ovsdb_idl_track_clear(ctx.ovnsb_idl);
+        }
+
+        VLOG_WARN("-----------------------------\n\n");
     }
 
+    VLOG_WARN("----> Exit the main loop \n\n");
     unixctl_server_destroy(unixctl);
     ovsdb_idl_loop_destroy(&ovnnb_idl_loop);
     ovsdb_idl_loop_destroy(&ovnsb_idl_loop);
