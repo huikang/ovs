@@ -2408,6 +2408,35 @@ add_column_noalert(struct ovsdb_idl *idl,
     ovsdb_idl_omit_alert(idl, column);
 }
 
+inline uint64_t
+rdtsc()
+{
+    uint32_t low, high;
+    asm volatile ("rdtsc" : "=a" (low), "=d" (high));
+    return (uint64_t)high << 32 | low;
+}
+
+static void
+test_rdtsc()
+{
+    uint64_t start;
+    uint64_t end;
+    int base, i, tmp;
+
+    /* profiling period */
+    start = rdtsc();
+    for (base = 0; base < 30; base++) {
+      for (i = base; i < 40; i+=1) {
+	tmp = tmp + 1;
+      }
+    }
+
+    end = rdtsc();
+
+    VLOG_WARN("Elapsed cycles: %10ld\n", (end - start));
+    // printf("Elapsed cycles: %10ld\n", (end - start));
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -2415,7 +2444,10 @@ main(int argc, char *argv[])
     struct unixctl_server *unixctl;
     int retval;
     bool exiting;
+    uint64_t start;
+    uint64_t end, t_nb, t_sb, t_commit;
 
+    t_nb = t_sb = t_commit = 0;
     fatal_ignore_sigpipe();
     set_program_name(argv[0]);
     service_start(&argc, &argv);
@@ -2488,9 +2520,20 @@ main(int argc, char *argv[])
             .ovnsb_txn = ovsdb_idl_loop_run(&ovnsb_idl_loop),
         };
 
+        // t_nb = t_sb = t_commit = 0;
+        start = rdtsc();
         ovnnb_db_run(&ctx);
-        ovnsb_db_run(&ctx);
+        end = rdtsc();
+        t_nb = end - start;
+        // VLOG_WARN("Cycles ovnnb_db_run():\t%10ld\n", (end - start));
 
+        start = rdtsc();
+        ovnsb_db_run(&ctx);
+        end = rdtsc();
+        t_sb = end - start;
+        // VLOG_WARN("Cycles ovnsb_db_run():\t%10ld\n", (end - start));
+
+        start = rdtsc();
         unixctl_server_run(unixctl);
         unixctl_server_wait(unixctl);
         if (exiting) {
@@ -2503,6 +2546,11 @@ main(int argc, char *argv[])
         if (should_service_stop()) {
             exiting = true;
         }
+        end = rdtsc();
+        t_commit = end - start;
+        // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
+        VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
+                  t_commit);
     }
 
     unixctl_server_destroy(unixctl);
