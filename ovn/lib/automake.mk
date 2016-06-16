@@ -12,7 +12,10 @@ ovn_lib_libovn_la_SOURCES = \
 	ovn/lib/lex.h \
 	ovn/lib/ovn-util.c \
 	ovn/lib/ovn-util.h \
-	ovn/lib/logical-fields.h
+	ovn/lib/logical-fields.h \
+	ovn/lib/datalog.h \
+	ovn/lib/datalog-private.h \
+	ovn/lib/datalog.c
 nodist_ovn_lib_libovn_la_SOURCES = \
 	ovn/lib/ovn-nb-idl.c \
 	ovn/lib/ovn-nb-idl.h \

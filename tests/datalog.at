@@ -1,0 +1,11 @@
+AT_BANNER([datalog])
+
+AT_SETUP([datalog engine])
+AT_KEYWORDS([ovn])
+
+# test-datalog has a set of cases. run it alone to see its output.
+AT_CHECK([ovstest test-datalog test], [0], [ignore], [PASS
+])
+
+AT_CLEANUP
+

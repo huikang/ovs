@@ -91,7 +91,8 @@ TESTSUITE_AT = \
 	tests/ovn-nbctl.at \
 	tests/ovn-sbctl.at \
 	tests/ovn-controller.at \
-	tests/ovn-controller-vtep.at
+	tests/ovn-controller-vtep.at \
+	tests/datalog.at
 
 SYSTEM_KMOD_TESTSUITE_AT = \
 	tests/system-common-macros.at \
@@ -351,7 +352,8 @@ tests_ovstest_SOURCES = \
 	tests/test-uuid.c \
 	tests/test-bitmap.c \
 	tests/test-vconn.c \
-	tests/test-aa.c
+	tests/test-aa.c \
+	tests/test-datalog.c
 
 if !WIN32
 tests_ovstest_SOURCES += \
