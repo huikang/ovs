@@ -2520,18 +2520,21 @@ main(int argc, char *argv[])
             .ovnsb_txn = ovsdb_idl_loop_run(&ovnsb_idl_loop),
         };
 
+        VLOG_WARN("+++++++++++++++++++++++++++++\n");
         // t_nb = t_sb = t_commit = 0;
         start = rdtsc();
         ovnnb_db_run(&ctx);
         end = rdtsc();
         t_nb = end - start;
         // VLOG_WARN("Cycles ovnnb_db_run():\t%10ld\n", (end - start));
+        VLOG_WARN("Done ovndb_db_run\n");
 
         start = rdtsc();
         ovnsb_db_run(&ctx);
         end = rdtsc();
         t_sb = end - start;
         // VLOG_WARN("Cycles ovnsb_db_run():\t%10ld\n", (end - start));
+        VLOG_WARN("Done ovnsb_db_run\n");
 
         start = rdtsc();
         unixctl_server_run(unixctl);
@@ -2542,6 +2545,7 @@ main(int argc, char *argv[])
         ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
 
+        VLOG_WARN("Starting poll_block\n");
         poll_block();
         if (should_service_stop()) {
             exiting = true;
@@ -2551,6 +2555,7 @@ main(int argc, char *argv[])
         // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
         VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
                   t_commit);
+        VLOG_WARN("-----------------------------\n\n");
     }
 
     unixctl_server_destroy(unixctl);
