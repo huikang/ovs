@@ -124,6 +124,14 @@ enum ovn_stage {
  * priority to determine the ACL's logical flow priority. */
 #define OVN_ACL_PRI_OFFSET 1000
 
+inline uint64_t
+rdtsc()
+{
+    uint32_t low, high;
+    asm volatile ("rdtsc" : "=a" (low), "=d" (high));
+    return (uint64_t)high << 32 | low;
+}
+
 /* Returns an "enum ovn_stage" built from the arguments. */
 static enum ovn_stage
 ovn_stage_build(enum ovn_datapath_type dp_type, enum ovn_pipeline pipeline,
@@ -515,6 +523,7 @@ ovn_port_create(struct hmap *ports, const char *key,
     op->nbs = nbs;
     op->nbr = nbr;
     hmap_insert(ports, &op->key_node, hash_string(op->key, 0));
+    // VLOG_INFO("Allocating lport %s\n", op->key);
     return op;
 }
 
@@ -558,17 +567,25 @@ join_logical_ports(struct northd_context *ctx,
                    struct ovs_list *sb_only, struct ovs_list *nb_only,
                    struct ovs_list *both)
 {
+    uint32_t count;
+    uint64_t start, t_build_ports;
+
     hmap_init(ports);
     ovs_list_init(sb_only);
     ovs_list_init(nb_only);
     ovs_list_init(both);
 
     const struct sbrec_port_binding *sb;
+    count = 0;
+    start = rdtsc();
     SBREC_PORT_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
         struct ovn_port *op = ovn_port_create(ports, sb->logical_port,
                                               NULL, NULL, sb);
         ovs_list_push_back(sb_only, &op->list);
+	count++;
     }
+    t_build_ports = rdtsc() - start;
+    VLOG_INFO("Allocated ports time:,\t%d,%16ld,\n", count, t_build_ports);
 
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
@@ -767,7 +784,7 @@ build_ports(struct northd_context *ctx, struct hmap *datapaths,
         ovn_port_destroy(ports, op);
     }
 }
-
+
 #define OVN_MIN_MULTICAST 32768
 #define OVN_MAX_MULTICAST 65535
 
@@ -2226,12 +2243,17 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
 static void
 ovnnb_db_run(struct northd_context *ctx)
 {
+    uint64_t start, t_build_ports;
+
     if (!ctx->ovnsb_txn) {
         return;
     }
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
+    start = rdtsc();
     build_ports(ctx, &datapaths, &ports);
+    t_build_ports = rdtsc() - start;
+    VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
     build_lflows(ctx, &datapaths, &ports);
 
     struct ovn_datapath *dp, *next_dp;
@@ -2406,14 +2428,6 @@ add_column_noalert(struct ovsdb_idl *idl,
 {
     ovsdb_idl_add_column(idl, column);
     ovsdb_idl_omit_alert(idl, column);
-}
-
-inline uint64_t
-rdtsc()
-{
-    uint32_t low, high;
-    asm volatile ("rdtsc" : "=a" (low), "=d" (high));
-    return (uint64_t)high << 32 | low;
 }
 
 static void
