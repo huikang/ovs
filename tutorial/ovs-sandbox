@@ -362,7 +362,7 @@ if $ovn; then
     ovs-vsctl set open . external-ids:ovn-encap-ip=127.0.0.1
 
     rungdb $gdb_ovn_northd $gdb_ovn_northd_ex ovn-northd --detach \
-        --no-chdir --pidfile -vconsole:off --log-file \
+        --no-chdir --pidfile -vconsole:off --verbose --log-file \
         --ovnsb-db=unix:"$sandbox"/ovnsb_db.sock \
         --ovnnb-db=unix:"$sandbox"/ovnnb_db.sock
     rungdb $gdb_ovn_controller $gdb_ovn_controller_ex ovn-controller \
