@@ -50,6 +50,8 @@ struct northd_context {
     struct ovsdb_idl_txn *ovnsb_txn;
 };
 
+int persist = 1;
+
 static const char *ovnnb_db;
 static const char *ovnsb_db;
 
@@ -804,87 +806,72 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
      *    - if the entry is not in either the both or the sb_only list,
      *          create a new entry in the nb_only list
      */
-    VLOG_INFO("----> To scanning lsp in nb db\n");
-    const struct nbrec_logical_port *nb;
-    NBREC_LOGICAL_PORT_FOR_EACH (nb, ctx->ovnnb_idl) {
-        VLOG_INFO("----> [OVN-NB] Tracked logical port in nb %s\n", nb->name);
+    VLOG_INFO("----> To scanning lsp in all datapaths\n");
+    struct ovn_datapath *od;
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        if (od->nbs) {
+            for (size_t i = 0; i < od->nbs->n_ports; i++) {
+                const struct nbrec_logical_port *nbs = od->nbs->ports[i];
+                VLOG_INFO("----> [OVN-NB] Tracked logical port in nb %s\n",
+                          nbs->name);
+                op = ovn_port_find(ports2, nbs->name);
+                if (op) {
+                    VLOG_INFO("\t\t----> Found in both list\n");
+                    if (!op->up || !*op->up) {
+                        VLOG_INFO("\t\t----> op up is false\n");
+                    } else {
+                        VLOG_INFO("\t\t----> op up is UP\n");
+                        if (sb_changed) {
+                            nbrec_logical_port_set_up(nbs, op->up, 1);
+                        }
+                    }
 
-        op = ovn_port_find(ports2, nb->name);
-        if (op) {
-            VLOG_INFO("\t\t----> Found in both list\n");
-            if (!op->up || !*op->up) {
-                VLOG_INFO("\t\t----> op up is false\n");
-            } else {
-                VLOG_INFO("\t\t----> op up is UP\n");
-                bool up = true;
-                if (sb_changed) {
-                    nbrec_logical_port_set_up(nb, &up, 1);
-                }
-            }
+                    op->od = od;
 
-            /*
-             * NOTE: this op has already been added to datapth
-             * must update the tnlid in od.
-             * TODO: If datapath were persisted, this step is unnecessary
-             */
-            struct ovn_datapath *od;
-            HMAP_FOR_EACH (od, key_node, datapaths) {
-                if (od->nbs) {
-                    for (size_t i = 0; i < od->nbs->n_ports; i++) {
-                        const struct nbrec_logical_port *nbs = od->nbs->ports[i];
-                        VLOG_INFO("\t\t----> nbs %s\n", nbs->name);
-                        if (!strcmp(nb->name, nbs->name)) {
-                            VLOG_INFO("\t\t matching; od port key hint %d",
-                                      od->port_key_hint);
-                            VLOG_INFO("\t\t Add to set: %d",
-                                      op->sb_tnl_key);
-                            op->od = od;
-                            add_tnlid(&op->od->port_tnlids, op->sb_tnl_key);
-                            VLOG_INFO("\t\t matching; add tnl key %u",
-                                      op->sb_tnl_key);
+                    /*
+                     * NOTE: this op has already been added to datapth
+                     * must update the tnlid in od.
+                     * TODO: If datapath were persisted, this step is unnecessary
+                     */
+                    VLOG_INFO("\t\t Add to set: %d", op->sb_tnl_key);
 
-                            if (op->sb_tnl_key > op->od->port_key_hint) {
-                                op->od->port_key_hint = op->sb_tnl_key;
-                            }
+                    add_tnlid(&op->od->port_tnlids, op->sb_tnl_key);
+                    VLOG_INFO("\t\t matching; add tnl key %u", op->sb_tnl_key);
+                    if (op->sb_tnl_key > op->od->port_key_hint) {
+                        op->od->port_key_hint = op->sb_tnl_key;
+                    }
+                    VLOG_INFO("\t\t updated od tnl key %d", op->od->port_key_hint);
 
-                            VLOG_INFO("\t\t updated od tnl key %d",
-                                      op->od->port_key_hint);
+                    /* since the port found the both list, setup nbs and sb for op */
+                    op->nbs = nbs;
+
+                    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
+                        if (!strcmp(sb->logical_port, op->key)) {
+                            op->sb = sb;
                             break;
                         }
                     }
-                }
-            }
-        } else {
-            VLOG_INFO("\t\t----> Not found in both list\n");
-            op = ovn_port_find(&sb_only_ports, nb->name);
-            if (op) {
-                VLOG_INFO("\t\t----> Found in sb_only list\n");
-            } else {
-                VLOG_INFO("\t\t----> Not found in sb_only list\n");
-                VLOG_INFO("\t\t----> Add to nb_only list\n");
-                /* Create a new entry in the nb_only list */
-                op = ovn_port_create(&nb_only_ports, nb->name, nb, NULL, NULL);
-                ovs_list_push_back(&nb_only, &op->list);
+                } else {
+                    VLOG_INFO("\t\t----> Not found in both list\n");
+                    op = ovn_port_find(&sb_only_ports, nbs->name);
+                    if (op) {
+                        VLOG_INFO("\t\t----> Found in sb_only list\n");
+                    } else {
+                        VLOG_INFO("\t\t----> Not found in sb_only list\n");
+                        VLOG_INFO("\t\t----> Add to nb_only list\n");
+                        /* Create a new entry in the nb_only list */
+                        op = ovn_port_create(&nb_only_ports, nbs->name, nbs, NULL, NULL);
+                        ovs_list_push_back(&nb_only, &op->list);
 
-                if (!op->up || !*op->up) {
-                    VLOG_INFO("\t\t----> op is initialized to false\n");
-                }
-                // datapath assignment
-                // op->od = 
-                VLOG_INFO("\t\t----> Looking for datapath\n");
-                struct ovn_datapath *od;
-                HMAP_FOR_EACH (od, key_node, datapaths) {
-                    if (od->nbs) {
-                        for (size_t i = 0; i < od->nbs->n_ports; i++) {
-                            const struct nbrec_logical_port *nbs = od->nbs->ports[i];
-                            VLOG_INFO("\t\t----> nbs %s\n", nbs->name);
-                            if (!strcmp(nb->name, nbs->name)) {
-                                VLOG_INFO("\t\t matching");
-                                op->od = od;
-                            }
+                        if (!op->up || !*op->up) {
+                            VLOG_INFO("\t\t----> op up is initialized to false\n");
                         }
-                    }
-                }
+
+                        // datapath assignment
+                        op->od = od;
+
+		    }
+		}
             }
         }
     }
@@ -893,7 +880,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
      * For each entry in the both list, do modifications to align the port
      * binding with nb information. (only for those change in nb scanning)
      */
-    
     VLOG_INFO("----> Align port binding with nb\n");
     LIST_FOR_EACH_SAFE (op, next, list, both2) {
         VLOG_INFO("\t\t----> Checking port %s\n", op->key);
@@ -941,6 +927,10 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
         ovs_list_push_back(both2, &op->list);
 
         VLOG_INFO("\t----> Inserted %s to both list\n", op->key);
+        VLOG_INFO("\t\t op point to sb lport: %s\n", op->sb->logical_port);
+
+        bool up = false;
+        nbrec_logical_port_set_up(op->nbs, &up, 1);
         hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));        
     }
 
@@ -1062,9 +1052,7 @@ ovn_multicast_add(struct hmap *mcgroups, const struct multicast_group *group,
 {
     struct ovn_datapath *od = port->od;
     struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, group);
-    VLOG_INFO("----> ovn multicast add\n");
     if (!mc) {
-        VLOG_INFO("\t----> not find multcast\n");
         mc = xmalloc(sizeof *mc);
         hmap_insert(mcgroups, &mc->hmap_node, ovn_multicast_hash(od, group));
         mc->datapath = od;
@@ -1072,8 +1060,6 @@ ovn_multicast_add(struct hmap *mcgroups, const struct multicast_group *group,
         mc->n_ports = 0;
         mc->allocated_ports = 4;
         mc->ports = xmalloc(mc->allocated_ports * sizeof *mc->ports);
-    } else {
-        VLOG_INFO("\t----> Found multcast\n");
     }
     if (mc->n_ports >= mc->allocated_ports) {
         mc->ports = x2nrealloc(mc->ports, &mc->allocated_ports,
@@ -1098,7 +1084,10 @@ ovn_multicast_update_sbrec(const struct ovn_multicast *mc,
 {
     struct sbrec_port_binding **ports = xmalloc(mc->n_ports * sizeof *ports);
     for (size_t i = 0; i < mc->n_ports; i++) {
+        VLOG_INFO("\t----> %lu Add mc port %s\n", i, mc->ports[i]->key);
+        VLOG_INFO("\t----> %lu Add mc sb port %s\n", i, mc->ports[i]->sb->logical_port);
         ports[i] = CONST_CAST(struct sbrec_port_binding *, mc->ports[i]->sb);
+        VLOG_INFO("\t----> Add ports to mc %s\n", ports[i]->logical_port);
     }
     sbrec_multicast_group_set_ports(sb, ports, mc->n_ports);
     free(ports);
@@ -1914,16 +1903,13 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
     /* Ingress table 6: Destination lookup, broadcast and multicast handling
      * (priority 100). */
-    VLOG_INFO("----> Ingress table 6\n");
     HMAP_FOR_EACH (op, key_node, ports) {
         if (!op->nbs) {
             continue;
         }
 
-        VLOG_INFO("----> Port name: %s\n", op->key);
-        VLOG_INFO("\t\tdp: %p\n", op->od);
-
         if (lport_is_enabled(op->nbs)) {
+            VLOG_INFO("----> Port name enabled in mc: %s\n", op->key);
             ovn_multicast_add(mcgroups, &mc_flood, op);
         }
     }
@@ -2386,17 +2372,14 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
     struct hmap lflows = HMAP_INITIALIZER(&lflows);
     struct hmap mcgroups = HMAP_INITIALIZER(&mcgroups);
 
-    VLOG_INFO("----> Build_lflows\n");
-    struct ovn_port *op;
-    HMAP_FOR_EACH (op, key_node, ports) {
-        VLOG_INFO("----> Port name: %s\n", op->key);
-        VLOG_INFO("\t\tdp: %p\n", op->od);
+    build_lswitch_flows(datapaths, ports, &lflows, &mcgroups);
+
+    struct ovn_multicast *mct;
+    HMAP_FOR_EACH (mct, hmap_node, &mcgroups) {
+        VLOG_INFO("---> Getting n_port: %lu\n", mct->allocated_ports);
     }
 
-    build_lswitch_flows(datapaths, ports, &lflows, &mcgroups);
     build_lrouter_flows(datapaths, ports, &lflows);
-
-    VLOG_INFO("---> built mcgroup size: %u\n", hmap_count(&mcgroups));
 
     /* Push changes to the Logical_Flow table to database. */
     const struct sbrec_logical_flow *sbflow, *next_sbflow;
@@ -2445,6 +2428,7 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
     /* Push changes to the Multicast_Group table to database. */
     const struct sbrec_multicast_group *sbmc, *next_sbmc;
     SBREC_MULTICAST_GROUP_FOR_EACH_SAFE (sbmc, next_sbmc, ctx->ovnsb_idl) {
+        VLOG_INFO("---> Push to mc: %s\n", sbmc->name);
         struct ovn_datapath *od = ovn_datapath_from_sbrec(datapaths,
                                                           sbmc->datapath);
         if (!od) {
@@ -2456,11 +2440,9 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
                                          .key = sbmc->tunnel_key };
         struct ovn_multicast *mc = ovn_multicast_find(&mcgroups, od, &group);
         if (mc) {
-            VLOG_INFO("---> PUsh find multicast group\n");
             ovn_multicast_update_sbrec(mc, sbmc);
             ovn_multicast_destroy(&mcgroups, mc);
         } else {
-            VLOG_INFO("---> Push not found\n");
             sbrec_multicast_group_delete(sbmc);
         }
     }
@@ -2482,7 +2464,6 @@ ovnnb_db_run(struct northd_context *ctx, struct hmap *ports2,
                                          struct ovs_list *both2)
 {
     uint64_t start, t_build_ports;
-    int persist = 0;
 
     if (!ctx->ovnsb_txn) {
         return;
@@ -2495,6 +2476,13 @@ ovnnb_db_run(struct northd_context *ctx, struct hmap *ports2,
         build_ports2(ctx, &datapaths, ports2, both2);
         t_build_ports = rdtsc() - start;
         VLOG_WARN("Cycle build_ports2():,\t%16ld,\n", t_build_ports);
+
+        struct ovn_port *op, *next;
+        LIST_FOR_EACH_SAFE (op, next, list, both2) {
+            VLOG_INFO("ports name: %s\n", op->key);
+            // VLOG_INFO("ports sb: %s\n", op->sb->logical_port);
+        }
+
         build_lflows(ctx, &datapaths, ports2);
         VLOG_WARN("Done build_flows\n");
     } else {
@@ -2805,12 +2793,14 @@ main(int argc, char *argv[])
         // VLOG_WARN("Cycles ovnnb_db_run():\t%10ld\n", (end - start));
         VLOG_WARN("Done ovndb_db_run\n");
 
+        if (!persist) {
         start = rdtsc();
         ovnsb_db_run(&ctx);
         end = rdtsc();
         t_sb = end - start;
         // VLOG_WARN("Cycles ovnsb_db_run():\t%10ld\n", (end - start));
         VLOG_WARN("Done ovnsb_db_run\n");
+	}
 
         start = rdtsc();
         unixctl_server_run(unixctl);
