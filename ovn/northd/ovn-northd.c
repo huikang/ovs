@@ -817,14 +817,25 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                 op = ovn_port_find(ports2, nbs->name);
                 if (op) {
                     // VLOG_INFO("\t\t----> Found in both list\n");
-                    if (!op->up || !*op->up) {
-		      // VLOG_INFO("\t\t----> op up is false\n");
-                    } else {
-                        // VLOG_INFO("\t\t----> op up is UP\n");
-                        if (sb_changed) {
-                            nbrec_logical_port_set_up(nbs, op->up, 1);
-                        }
+
+
+      	            /* since the port found the both list, setup nbs and sb for op */
+		    op->nbs = nbs;
+                    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
+                        if (!strcmp(sb->logical_port, op->key)) {
+                            op->sb = sb;
+                           break;
+                       }
                     }
+
+                    if (op->sb->chassis && (!nbs->up || !*nbs->up)) {
+		        bool up = true;
+                        nbrec_logical_port_set_up(nbs, &up, 1);
+		    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
+		        bool up = false;
+		        nbrec_logical_port_set_up(nbs, &up, 1);
+		    }
+
 
                     op->od = od;
 
@@ -841,16 +852,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                         op->od->port_key_hint = op->sb_tnl_key;
                     }
                     // VLOG_INFO("\t\t updated od tnl key %d", op->od->port_key_hint);
-
-                    /* since the port found the both list, setup nbs and sb for op */
-                    op->nbs = nbs;
-
-                    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-                        if (!strcmp(sb->logical_port, op->key)) {
-                            op->sb = sb;
-                            break;
-                        }
-                    }
                 } else {
                     VLOG_INFO("\t\t----> Not found in both list\n");
                     op = ovn_port_find(&sb_only_ports, nbs->name);
