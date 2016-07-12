@@ -50,7 +50,11 @@ struct northd_context {
     struct ovsdb_idl_txn *ovnsb_txn;
 };
 
-int persist = 1;
+/* Persisted both2 list and ports2 */
+static bool persist = false;
+struct hmap ports2;
+struct ovs_list both2;
+
 
 static const char *ovnnb_db;
 static const char *ovnsb_db;
@@ -761,8 +765,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     hmap_init(&sb_only_ports);
     hmap_init(&nb_only_ports);
 
-    bool sb_changed;
-    sb_changed = false;
     /*
      * - For each tracked entry in the port bindings table
      *     - if it is a new entry, check for it in the both list
@@ -2491,57 +2493,51 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
     hmap_destroy(&mcgroups);
 }
 
+
 static void
-ovnnb_db_run(struct northd_context *ctx, struct hmap *ports2,
+ovn_db_run(struct northd_context *ctx, struct hmap *ports2,
                                          struct ovs_list *both2)
 {
     uint64_t start, t_build_ports;
+    if (!ctx->ovnsb_txn || !ctx->ovnnb_txn) {
+        VLOG_INFO("No ctx of sb or nb");
+        return;
+    }
 
-    if (persist) {
-        VLOG_INFO("Persist ports");
-        if (!ctx->ovnsb_txn || !ctx->ovnnb_txn) {
-            VLOG_INFO("No ctx of sb or nb");
-            return;
-        }
-    } else {
-        if (!ctx->ovnsb_txn) {
-            VLOG_INFO("No ctx of sb, skip ovnnb_db_run");
-            return;
-        } else {
-            VLOG_INFO("In ctx of sb, running ovnnb_db_run");
-        }
+    struct hmap datapaths;
+    build_datapaths(ctx, &datapaths);
+
+    start = rdtsc();
+    build_ports2(ctx, &datapaths, ports2, both2);
+    t_build_ports = rdtsc() - start;
+    VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
+
+    build_lflows(ctx, &datapaths, ports2);
+
+    struct ovn_datapath *dp, *next_dp;
+    HMAP_FOR_EACH_SAFE (dp, next_dp, key_node, &datapaths) {
+      ovn_datapath_destroy(&datapaths, dp);
+    }
+    hmap_destroy(&datapaths);
+}
+
+static void
+ovnnb_db_run(struct northd_context *ctx)
+{
+    uint64_t start, t_build_ports;
+
+    if (!ctx->ovnsb_txn) {
+        return;
     }
 
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
 
-    if (persist) {
-        struct ovn_port *op, *next;
-        LIST_FOR_EACH_SAFE (op, next, list, both2) {
-            VLOG_INFO("p0 ports name: %s\n", op->key);
-            // VLOG_INFO("p0 ports sb: %s\n", op->sb->logical_port);
-        }
-
-        start = rdtsc();
-        build_ports2(ctx, &datapaths, ports2, both2);
-        t_build_ports = rdtsc() - start;
-        VLOG_WARN("Cycle build_ports2():,\t%16ld,\n", t_build_ports);
-
-        LIST_FOR_EACH_SAFE (op, next, list, both2) {
-            VLOG_INFO("ports name: %s\n", op->key);
-            VLOG_INFO("ports sb: %s\n", op->sb->logical_port);
-        }
-
-        build_lflows(ctx, &datapaths, ports2);
-        VLOG_WARN("Done build_flows\n");
-    } else {
-        start = rdtsc();
-        build_ports(ctx, &datapaths, &ports);
-        t_build_ports = rdtsc() - start;
-        VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
-        build_lflows(ctx, &datapaths, &ports);
-        VLOG_WARN("Done build_lflows\n");
-    }
+    start = rdtsc();
+    build_ports(ctx, &datapaths, &ports);
+    t_build_ports = rdtsc() - start;
+    VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
+    build_lflows(ctx, &datapaths, &ports);
 
     struct ovn_datapath *dp, *next_dp;
     HMAP_FOR_EACH_SAFE (dp, next_dp, key_node, &datapaths) {
@@ -2549,14 +2545,11 @@ ovnnb_db_run(struct northd_context *ctx, struct hmap *ports2,
     }
     hmap_destroy(&datapaths);
 
-    if (!persist) {
-        struct ovn_port *port, *next_port;
-        HMAP_FOR_EACH_SAFE (port, next_port, key_node, &ports) {
-            ovn_port_destroy(&ports, port);
-        }
-        hmap_destroy(&ports);
-        VLOG_WARN("Done clean up\n");
+    struct ovn_port *port, *next_port;
+    HMAP_FOR_EACH_SAFE (port, next_port, key_node, &ports) {
+        ovn_port_destroy(&ports, port);
     }
+     hmap_destroy(&ports);
 }
 
 /*
@@ -2568,10 +2561,7 @@ static void
 ovnsb_db_run(struct northd_context *ctx)
 {
     if (!ctx->ovnnb_txn) {
-        VLOG_INFO("No ctx of nb, skip");
         return;
-    } else {
-        VLOG_INFO("In ctx of nb, running ovnsb_db_run");
     }
 
     struct hmap lports_hmap;
@@ -2659,6 +2649,7 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     static const struct option long_options[] = {
         {"ovnsb-db", required_argument, NULL, 'd'},
         {"ovnnb-db", required_argument, NULL, 'D'},
+        {"persist", no_argument, NULL, 'q'},
         {"help", no_argument, NULL, 'h'},
         {"options", no_argument, NULL, 'o'},
         {"version", no_argument, NULL, 'V'},
@@ -2688,6 +2679,10 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
         case 'D':
             ovnnb_db = optarg;
+            break;
+
+        case 'q':
+            persist = true;
             break;
 
         case 'h':
@@ -2818,16 +2813,16 @@ main(int argc, char *argv[])
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_type);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_options);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_mac);
-    // ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
-    // Only track the chassis column in Port_binding
-    ovsdb_idl_track_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
-    // ovsdb_idl_track_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_logical_port);
 
-    /* Persisted both2 list and ports2 */
-    struct hmap ports2;
-    hmap_init(&ports2);
-    struct ovs_list both2;
-    ovs_list_init(&both2);
+    if (persist) {
+        // Only track the chassis column in Port_binding
+        ovsdb_idl_track_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
+
+        hmap_init(&ports2);
+        ovs_list_init(&both2);
+    } else {
+        ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
+    }
 
     /* Main loop. */
     exiting = false;
@@ -2840,29 +2835,31 @@ main(int argc, char *argv[])
             .ovnsb_txn = ovsdb_idl_loop_run(&ovnsb_idl_loop),
         };
 
-        // t_nb = t_sb = t_commit = 0;
-        start = rdtsc();
-        // ovsdb_idl_track_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
-        ovnnb_db_run(&ctx, &ports2, &both2);
-        // ovsdb_idl_track_clear(ctx.ovnsb_idl);
-        end = rdtsc();
-        t_nb = end - start;
-        // VLOG_WARN("Cycles ovnnb_db_run():\t%10ld\n", (end - start));
-        struct ovn_port *op, *next;
-        LIST_FOR_EACH_SAFE (op, next, list, &both2) {
-            VLOG_INFO("p2 ports name: %s\n", op->key);
-            // VLOG_INFO("p2 ports sb: %s\n", op->sb->logical_port);
-        }
-        VLOG_WARN("Done ovndb_db_run\n");
+        if (persist) {
+            ovn_db_run(&ctx, &ports2, &both2);
+            struct ovn_port *op, *next;
+            LIST_FOR_EACH_SAFE (op, next, list, &both2) {
+                VLOG_INFO("p2 ports name: %s\n", op->key);
+                // VLOG_INFO("p2 ports sb: %s\n", op->sb->logical_port);
+	    }
+        } else {
+            // t_nb = t_sb = t_commit = 0;
+            start = rdtsc();
+            ovnnb_db_run(&ctx);
+            // ovsdb_idl_track_clear(ctx.ovnsb_idl);
+            end = rdtsc();
+            t_nb = end - start;
+            // VLOG_WARN("Cycles ovnnb_db_run():\t%10ld\n", (end - start));
 
-        if (!persist) {
+            VLOG_WARN("Done ovndb_db_run\n");
+
             start = rdtsc();
             ovnsb_db_run(&ctx);
             end = rdtsc();
             t_sb = end - start;
             // VLOG_WARN("Cycles ovnsb_db_run():\t%10ld\n", (end - start));
             VLOG_WARN("Done ovnsb_db_run\n");
-	}
+        }
 
         start = rdtsc();
         unixctl_server_run(unixctl);
@@ -2883,12 +2880,17 @@ main(int argc, char *argv[])
         // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
         VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
                   t_commit);
-        ovsdb_idl_track_clear(ctx.ovnsb_idl);
 
-        LIST_FOR_EACH_SAFE (op, next, list, &both2) {
-            VLOG_INFO("p3 ports name: %s\n", op->key);
-            // VLOG_INFO("p3 ports sb: %s\n", op->sb->logical_port);
+        if (persist) {
+            ovsdb_idl_track_clear(ctx.ovnsb_idl);
+
+            struct ovn_port *op, *next;
+            LIST_FOR_EACH_SAFE (op, next, list, &both2) {
+                VLOG_INFO("p3 ports name: %s\n", op->key);
+                // VLOG_INFO("p3 ports sb: %s\n", op->sb->logical_port);
+            }
         }
+
         VLOG_WARN("-----------------------------\n\n");
     }
 
