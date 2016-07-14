@@ -53,6 +53,11 @@ struct northd_context {
     struct ovsdb_idl_txn *ovnsb_txn;
 };
 
+struct lport_hash_node {
+    struct hmap_node node;
+    const struct nbrec_logical_switch_port *nbsp;
+};
+
 static const char *ovnnb_db;
 static const char *ovnsb_db;
 
@@ -3206,20 +3211,51 @@ ovnnb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
     }
 }
 
+static void
+sb_chassis_update_nbsec(const struct sbrec_port_binding *sb,
+                        struct hmap *lports_hmap)
+
+{
+    struct lport_hash_node *hash_node;
+    const struct nbrec_logical_switch_port *nbsp;
+
+    nbsp = NULL;
+    HMAP_FOR_EACH_WITH_HASH(hash_node, node,
+                            hash_string(sb->logical_port, 0),
+                            lports_hmap) {
+        if (!strcmp(sb->logical_port, hash_node->nbsp->name)) {
+            nbsp = hash_node->nbsp;
+            break;
+        }
+    }
+
+    if (!nbsp) {
+        /* The logical port doesn't exist for this port binding.  This can
+         * happen under normal circumstances when ovn-northd hasn't gotten
+         * around to pruning the Port_Binding yet. */
+        return;
+    }
+
+    if (sb->chassis && (!nbsp->up || !*nbsp->up)) {
+        bool up = true;
+        nbrec_logical_switch_port_set_up(nbsp, &up, 1);
+    } else if (!sb->chassis && (!nbsp->up || *nbsp->up)) {
+        bool up = false;
+        nbrec_logical_switch_port_set_up(nbsp, &up, 1);
+    }
+}
+
 /* Handle changes to the 'chassis' column of the 'Port_Binding' table.  When
  * this column is not empty, it means we need to set the corresponding logical
  * port as 'up' in the northbound DB. */
 static void
-update_logical_port_status(struct northd_context *ctx)
+update_logical_port_status(struct northd_context *ctx, bool is_init)
 {
     struct hmap lports_hmap;
     const struct sbrec_port_binding *sb;
     const struct nbrec_logical_switch_port *nbsp;
 
-    struct lport_hash_node {
-        struct hmap_node node;
-        const struct nbrec_logical_switch_port *nbsp;
-    } *hash_node;
+    struct lport_hash_node *hash_node;
 
     hmap_init(&lports_hmap);
 
@@ -3229,30 +3265,13 @@ update_logical_port_status(struct northd_context *ctx)
         hmap_insert(&lports_hmap, &hash_node->node, hash_string(nbsp->name, 0));
     }
 
-    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-        nbsp = NULL;
-        HMAP_FOR_EACH_WITH_HASH(hash_node, node,
-                                hash_string(sb->logical_port, 0),
-                                &lports_hmap) {
-            if (!strcmp(sb->logical_port, hash_node->nbsp->name)) {
-                nbsp = hash_node->nbsp;
-                break;
-            }
+    if (is_init) {
+        SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
+            sb_chassis_update_nbsec(sb, &lports_hmap);
         }
-
-        if (!nbsp) {
-            /* The logical port doesn't exist for this port binding.  This can
-             * happen under normal circumstances when ovn-northd hasn't gotten
-             * around to pruning the Port_Binding yet. */
-            continue;
-        }
-
-        if (sb->chassis && (!nbsp->up || !*nbsp->up)) {
-            bool up = true;
-            nbrec_logical_switch_port_set_up(nbsp, &up, 1);
-        } else if (!sb->chassis && (!nbsp->up || *nbsp->up)) {
-            bool up = false;
-            nbrec_logical_switch_port_set_up(nbsp, &up, 1);
+    } else {
+        SBREC_PORT_BINDING_FOR_EACH_TRACKED(sb, ctx->ovnsb_idl) {
+            sb_chassis_update_nbsec(sb, &lports_hmap);
         }
     }
 
@@ -3354,13 +3373,14 @@ update_northbound_cfg(struct northd_context *ctx,
 
 /* Handle a fairly small set of changes in the southbound database. */
 static void
-ovnsb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
+ovnsb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop,
+             bool is_init)
 {
     if (!ctx->ovnnb_txn || !ovsdb_idl_has_ever_connected(ctx->ovnsb_idl)) {
         return;
     }
 
-    update_logical_port_status(ctx);
+    update_logical_port_status(ctx, is_init);
     update_northbound_cfg(ctx, sb_loop);
 }
 
@@ -3463,6 +3483,19 @@ add_column_noalert(struct ovsdb_idl *idl,
     ovsdb_idl_omit_alert(idl, column);
 }
 
+static void
+ovnsb_db_run_init(struct ovsdb_idl_loop *ovnsb_idl_loop)
+{
+    struct northd_context ctx = {
+        .ovnnb_idl = NULL,
+        .ovnnb_txn = NULL,
+        .ovnsb_idl = ovnsb_idl_loop->idl,
+        .ovnsb_txn = ovsdb_idl_loop_run(ovnsb_idl_loop),
+    };
+
+    ovnsb_db_run(&ctx, ovnsb_idl_loop, true);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -3537,7 +3570,6 @@ main(int argc, char *argv[])
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_type);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_options);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_port_binding_col_mac);
-    ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
     ovsdb_idl_add_table(ovnsb_idl_loop.idl, &sbrec_table_dhcp_options);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_dhcp_options_col_code);
     add_column_noalert(ovnsb_idl_loop.idl, &sbrec_dhcp_options_col_type);
@@ -3550,6 +3582,9 @@ main(int argc, char *argv[])
     ovsdb_idl_add_table(ovnsb_idl_loop.idl, &sbrec_table_chassis);
     ovsdb_idl_add_column(ovnsb_idl_loop.idl, &sbrec_chassis_col_nb_cfg);
 
+    ovnsb_db_run_init(&ovnsb_idl_loop);
+    ovsdb_idl_track_add_column(ovnsb_idl_loop.idl, &sbrec_port_binding_col_chassis);
+
     /* Main loop. */
     exiting = false;
     while (!exiting) {
@@ -3561,7 +3596,7 @@ main(int argc, char *argv[])
         };
 
         ovnnb_db_run(&ctx, &ovnsb_idl_loop);
-        ovnsb_db_run(&ctx, &ovnsb_idl_loop);
+        ovnsb_db_run(&ctx, &ovnsb_idl_loop, false);
         if (ctx.ovnsb_txn) {
             check_and_add_supported_dhcp_opts_to_sb_db(&ctx);
         }
@@ -3573,6 +3608,7 @@ main(int argc, char *argv[])
         }
         ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
+        ovsdb_idl_track_clear(ctx.ovnsb_idl);
 
         poll_block();
         if (should_service_stop()) {
