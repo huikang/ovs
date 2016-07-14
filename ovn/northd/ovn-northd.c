@@ -597,7 +597,7 @@ join_logical_ports(struct northd_context *ctx,
         struct ovn_port *op = ovn_port_create(ports, sb->logical_port,
                                               NULL, NULL, sb);
         ovs_list_push_back(sb_only, &op->list);
-	count++;
+        count++;
     }
     t_build_ports = rdtsc() - start;
     VLOG_INFO("Allocated ports time:,\t%d,%16ld,\n", count, t_build_ports);
@@ -839,21 +839,21 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
                     /* TODO: this step should be done for ports changed in port_binding
                      */
-		    if (op->sb->chassis && (!nbs->up || !*nbs->up)) {
+                    if (op->sb->chassis && (!nbs->up || !*nbs->up)) {
                         bool up = true;
-		        nbrec_logical_port_set_up(nbs, &up, 1);
-		    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
-		        bool up = false;
-		        nbrec_logical_port_set_up(nbs, &up, 1);
-		    }
+                        nbrec_logical_port_set_up(nbs, &up, 1);
+                    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
+                        bool up = false;
+                        nbrec_logical_port_set_up(nbs, &up, 1);
+                    }
 
                     /*
                     if (op->sb->chassis && (!op->up || !*op->up)) {
                       bool up = true;
-		      nbrec_logical_port_set_up(nbs, &up, 1);
+                      nbrec_logical_port_set_up(nbs, &up, 1);
                       VLOG_INFO("\t\t----> op up is true\n");
                     } else if (!op->sb->chassis && (!op->up || *op->up)) {
-		      bool up = false;
+                      bool up = false;
                       VLOG_INFO("\t\t----> op up is false\n");
 		      nbrec_logical_port_set_up(nbs, &up, 1);
 		      }*/
@@ -2836,12 +2836,16 @@ main(int argc, char *argv[])
         };
 
         if (persist) {
+            start = rdtsc();
             ovn_db_run(&ctx, &ports2, &both2);
+            end = rdtsc();
+            t_nb = end - start;
             struct ovn_port *op, *next;
             LIST_FOR_EACH_SAFE (op, next, list, &both2) {
                 VLOG_INFO("p2 ports name: %s\n", op->key);
                 // VLOG_INFO("p2 ports sb: %s\n", op->sb->logical_port);
 	    }
+            t_sb = 0;
         } else {
             // t_nb = t_sb = t_commit = 0;
             start = rdtsc();
@@ -2869,17 +2873,19 @@ main(int argc, char *argv[])
         }
         ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
+        end = rdtsc();
+        t_commit = end - start;
+
+        // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
+        VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
+                  t_commit);
+
 
         VLOG_WARN("Starting poll_block\n");
         poll_block();
         if (should_service_stop()) {
             exiting = true;
         }
-        end = rdtsc();
-        t_commit = end - start;
-        // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
-        VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
-                  t_commit);
 
         if (persist) {
             ovsdb_idl_track_clear(ctx.ovnsb_idl);
