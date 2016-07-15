@@ -593,7 +593,7 @@ join_logical_ports(struct northd_context *ctx,
         struct ovn_port *op = ovn_port_create(ports, sb->logical_port,
                                               NULL, NULL, sb);
         ovs_list_push_back(sb_only, &op->list);
-	count++;
+        count++;
     }
     t_build_ports = rdtsc() - start;
     VLOG_INFO("Allocated ports time:,\t%d,%16ld,\n", count, t_build_ports);
@@ -808,7 +808,7 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                 op = ovn_port_find(ports2, nbs->name);
                 if (op) {
       	            /* since the port found the both list, setup nbs and sb for op */
-		    op->nbs = nbs;
+                    op->nbs = nbs;
                     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
                         if (!strcmp(sb->logical_port, op->key)) {
                             op->sb = sb;
@@ -819,10 +819,10 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                     if (op->sb->chassis && (!nbs->up || !*nbs->up)) {
                         bool up = true;
                         nbrec_logical_port_set_up(nbs, &up, 1);
-		    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
+                    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
                         bool up = false;
                         nbrec_logical_port_set_up(nbs, &up, 1);
-		    }
+                    }
 
                     op->od = od;
 
@@ -2793,6 +2793,8 @@ main(int argc, char *argv[])
         }
         ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
+        end = rdtsc();
+        t_commit = end - start;
 
         VLOG_WARN("Starting poll_block\n");
         poll_block();
@@ -2801,7 +2803,6 @@ main(int argc, char *argv[])
         }
 
         // VLOG_WARN("Cycles remaining:\t%10ld\n", (end - start));
-        t_commit = 0;
         VLOG_WARN("Cycles:,\t%16ld,%16ld,%16ld,\n", t_nb, t_sb,
                   t_commit);
 
