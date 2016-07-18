@@ -752,7 +752,7 @@ static void
 build_ports2(struct northd_context *ctx, struct hmap *datapaths,
              struct hmap *ports2, struct ovs_list *both2)
 {
-    struct hmap sb_only_ports, nb_only_ports;
+    struct hmap sb_only_ports, nb_only_ports, sb_hmap;
     struct ovs_list sb_only, nb_only;
     struct ovn_port *op, *next;
     ovs_list_init(&sb_only);
@@ -790,6 +790,20 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
         }
     }
 
+    /* setup hash node for entry in the sb port_binding */
+    struct sb_hash_node {
+        struct hmap_node node;
+        const struct sbrec_port_binding *sb;
+    } *hash_node;
+
+    hmap_init(&sb_hmap);
+
+    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
+        hash_node = xzalloc(sizeof *hash_node);
+        hash_node->sb = sb;
+        hmap_insert(&sb_hmap, &hash_node->node, hash_string(sb->logical_port, 0));
+    }
+
     /*
      * - For each port known via the nb db:
      *    - if the entry is found in the both list, update the nb data contained
@@ -809,9 +823,19 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                 if (op) {
       	            /* since the port found the both list, setup nbs and sb for op */
                     op->nbs = nbs;
+                    /*
                     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
                         if (!strcmp(sb->logical_port, op->key)) {
                             op->sb = sb;
+                            break;
+                        }
+			} */
+
+                    HMAP_FOR_EACH_WITH_HASH(hash_node, node,
+                                            hash_string(op->key, 0),
+                                            &sb_hmap) {
+                        if (!strcmp(op->key, hash_node->sb->logical_port)) {
+                            op->sb = hash_node->sb;
                             break;
                         }
                     }
@@ -917,6 +941,10 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     }
 
     /* For each entry in the sb_only list, remove from the port_binding table */
+    HMAP_FOR_EACH_POP(hash_node, node, &sb_hmap) {
+        free(hash_node);
+    }
+    hmap_destroy(&sb_hmap);
 }
 
 /* Updates the southbound Port_Binding table so that it contains the logical
