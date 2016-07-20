@@ -761,35 +761,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     hmap_init(&sb_only_ports);
     hmap_init(&nb_only_ports);
 
-    /*
-     * - For each tracked entry in the port bindings table
-     *     - if it is a new entry, check for it in the both list
-     *         - if it is not there, then add it to the sb_only list
-     *     - if it is a modified entry, find it in the both list and update
-     *       the sb information contained in the entry, e.g., chassis column
-     *       is updated in the Port_binding table
-     */
-    const struct sbrec_port_binding *sb;
-    SBREC_PORT_BINDING_FOR_EACH_TRACKED (sb, ctx->ovnsb_idl) {
-        if (sb->header_.old) {
-
-            op = ovn_port_find(ports2, sb->logical_port);
-            if (op) {
-                /*
-                 * Extract the chassis column
-                 * TODO: up could also be false when unbounding
-                 */
-                bool up = true;
-                op->up = &up;
-            } else {
-                // VLOG_INFO("\t\t----> Not found in both list\n");
-            }
-
-        } else {
-            // VLOG_INFO("----> Insert a new entry\n");
-        }
-    }
-
     /* setup hash node for entry in the sb port_binding */
     struct sb_hash_node {
         struct hmap_node node;
@@ -798,6 +769,7 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
     hmap_init(&sb_hmap);
 
+    const struct sbrec_port_binding *sb;
     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
         hash_node = xzalloc(sizeof *hash_node);
         hash_node->sb = sb;
@@ -823,14 +795,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                 if (op) {
       	            /* since the port found the both list, setup nbs and sb for op */
                     op->nbs = nbs;
-                    /*
-                    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-                        if (!strcmp(sb->logical_port, op->key)) {
-                            op->sb = sb;
-                            break;
-                        }
-			} */
-
                     HMAP_FOR_EACH_WITH_HASH(hash_node, node,
                                             hash_string(op->key, 0),
                                             &sb_hmap) {
@@ -838,14 +802,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                             op->sb = hash_node->sb;
                             break;
                         }
-                    }
-
-                    if (op->sb->chassis && (!nbs->up || !*nbs->up)) {
-                        bool up = true;
-                        nbrec_logical_port_set_up(nbs, &up, 1);
-                    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
-                        bool up = false;
-                        nbrec_logical_port_set_up(nbs, &up, 1);
                     }
 
                     op->od = od;
@@ -932,12 +888,9 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
         ovs_list_remove(&op->list);
         ovs_list_push_back(both2, &op->list);
 
+	hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));
         VLOG_INFO("\t----> Inserted %s to both list\n", op->key);
         VLOG_INFO("\t\t op point to sb lport: %s\n", op->sb->logical_port);
-
-        bool up = false;
-        nbrec_logical_port_set_up(op->nbs, &up, 1);
-        hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));        
     }
 
     /* For each entry in the sb_only list, remove from the port_binding table */
@@ -2463,8 +2416,8 @@ ovn_db_run(struct northd_context *ctx, struct hmap *ports2,
                                        struct ovs_list *both2)
 {
     uint64_t start, t_build_ports;
-    if (!ctx->ovnsb_txn || !ctx->ovnnb_txn) {
-        VLOG_INFO("No ctx of sb or nb");
+    if (!ctx->ovnsb_txn) {
+        VLOG_INFO("No ctx of sb");
         return;
     }
 
@@ -2785,6 +2738,11 @@ main(int argc, char *argv[])
     }
 
     /* Main loop. */
+    if (persist) {
+        VLOG_WARN("Persist set\n\n");
+    } else {
+        VLOG_WARN("Persist NOT set\n\n");
+    }
     exiting = false;
     while (!exiting) {
         VLOG_WARN("+++++++++++++++++++++++++++++\n\n");
@@ -2800,19 +2758,17 @@ main(int argc, char *argv[])
             ovn_db_run(&ctx, &ports2, &both2);
             end = rdtsc();
             t_nb = end - start;
-
-            t_sb = 0;
         } else {
             start = rdtsc();
             ovnnb_db_run(&ctx);
             end = rdtsc();
             t_nb = end - start;
-
-            start = rdtsc();
-            ovnsb_db_run(&ctx);
-            end = rdtsc();
-            t_sb = end - start;
         }
+
+        start = rdtsc();
+        ovnsb_db_run(&ctx);
+        end = rdtsc();
+        t_sb = end - start;
 
         unixctl_server_run(unixctl);
         unixctl_server_wait(unixctl);
