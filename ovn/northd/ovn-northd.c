@@ -765,46 +765,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     hmap_init(&sb_only_ports);
     hmap_init(&nb_only_ports);
 
-    /*
-     * - For each tracked entry in the port bindings table
-     *     - if it is a new entry, check for it in the both list
-     *         - if it is not there, then add it to the sb_only list
-     *     - if it is a modified entry, find it in the both list and update
-     *       the sb information contained in the entry, e.g., chassis column
-     *       is updated in the Port_binding table
-     */
-    const struct sbrec_port_binding *sb;
-    SBREC_PORT_BINDING_FOR_EACH_TRACKED (sb, ctx->ovnsb_idl) {
-        VLOG_INFO("----> [OVN-SB] Tracked logical port %s\n", sb->logical_port);
-        if (sb->header_.old) {
-            VLOG_INFO("----> Modified entry\n");
-
-            op = ovn_port_find(ports2, sb->logical_port);
-            if (op) {
-                VLOG_INFO("\t\t----> Found in both list\n");
-                /*
-                 * Extract the chassis column
-                 * TODO: up could also be false when unbounding
-                 */
-                if (sb->chassis && (!op->up || !*op->up)) {
-                    bool up = true;
-                    op->up = &up;
-                    VLOG_INFO("\t\t----> set op up to true\n");
-		} else if (!sb->chassis && (!op->up || *op->up)) {
-		    bool up = false;
-                    VLOG_INFO("\t\t----> set op up to false\n");
-		    op->up = &up;
-		}
-
-            } else {
-                VLOG_INFO("\t\t----> Not found in both list\n");
-            }
-
-        } else {
-            VLOG_INFO("----> Insert a new entry\n");
-        }
-    }
-
     /* setup hash node for entry in the sb port_binding */
     struct sb_hash_node {
         struct hmap_node node;
@@ -813,6 +773,7 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
     hmap_init(&sb_hmap);
 
+    const struct sbrec_port_binding *sb;
     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
         hash_node = xzalloc(sizeof *hash_node);
         hash_node->sb = sb;
@@ -843,14 +804,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
                     /* since the port found the both list, setup nbs and sb for op */
                     op->nbs = nbs;
-
-                    /*
-                    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-                        if (!strcmp(sb->logical_port, op->key)) {
-                            op->sb = sb;
-                            break;
-                        }
-			}*/
                     HMAP_FOR_EACH_WITH_HASH(hash_node, node,
                                             hash_string(op->key, 0),
                                             &sb_hmap) {
@@ -860,36 +813,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                         }
                     }
 
-                    /* TODO: this step should be done for ports changed in port_binding
-                     */
-                    if (op->sb->chassis && (!nbs->up || !*nbs->up)) {
-                        bool up = true;
-                        nbrec_logical_port_set_up(nbs, &up, 1);
-                    } else if (!op->sb->chassis && (!nbs->up || *nbs->up)) {
-                        bool up = false;
-                        nbrec_logical_port_set_up(nbs, &up, 1);
-                    }
-
-                    /*
-                    if (op->sb->chassis && (!op->up || !*op->up)) {
-                      bool up = true;
-                      nbrec_logical_port_set_up(nbs, &up, 1);
-                      VLOG_INFO("\t\t----> op up is true\n");
-                    } else if (!op->sb->chassis && (!op->up || *op->up)) {
-                      bool up = false;
-                      VLOG_INFO("\t\t----> op up is false\n");
-		      nbrec_logical_port_set_up(nbs, &up, 1);
-		      }*/
-
-                    /*
-                    if (!op->up || !*op->up) {
-                        VLOG_INFO("\t\t----> op up is false\n");
-                    } else {
-                        VLOG_INFO("\t\t----> op up is UP\n");
-                        if (sb_changed) {
-                            nbrec_logical_port_set_up(nbs, op->up, 1);
-                        }
-			}*/
 
                     op->od = od;
 
@@ -982,12 +905,9 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
         ovs_list_remove(&op->list);
         ovs_list_push_back(both2, &op->list);
 
+        hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));
         VLOG_INFO("\t----> Inserted %s to both list\n", op->key);
         VLOG_INFO("\t\t op point to sb lport: %s\n", op->sb->logical_port);
-
-        bool up = false;
-        nbrec_logical_port_set_up(op->nbs, &up, 1);
-        hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));        
     }
 
     /* For each entry in the sb_only list, remove from the port_binding table */
@@ -2526,8 +2446,8 @@ ovn_db_run(struct northd_context *ctx, struct hmap *ports2,
                                          struct ovs_list *both2)
 {
     uint64_t start, t_build_ports;
-    if (!ctx->ovnsb_txn || !ctx->ovnnb_txn) {
-        VLOG_INFO("No ctx of sb or nb");
+    if (!ctx->ovnsb_txn) {
+        VLOG_INFO("No ctx of sb");
         return;
     }
 
@@ -2872,7 +2792,7 @@ main(int argc, char *argv[])
                 VLOG_INFO("p2 ports name: %s\n", op->key);
                 // VLOG_INFO("p2 ports sb: %s\n", op->sb->logical_port);
             }
-            t_sb = 0;
+            VLOG_WARN("Done ovn_db_run\n");
         } else {
             // t_nb = t_sb = t_commit = 0;
             start = rdtsc();
@@ -2883,14 +2803,13 @@ main(int argc, char *argv[])
             // VLOG_WARN("Cycles ovnnb_db_run():\t%10ld\n", (end - start));
 
             VLOG_WARN("Done ovndb_db_run\n");
-
-            start = rdtsc();
-            ovnsb_db_run(&ctx);
-            end = rdtsc();
-            t_sb = end - start;
-            // VLOG_WARN("Cycles ovnsb_db_run():\t%10ld\n", (end - start));
-            VLOG_WARN("Done ovnsb_db_run\n");
         }
+        start = rdtsc();
+        ovnsb_db_run(&ctx);
+        end = rdtsc();
+        t_sb = end - start;
+        // VLOG_WARN("Cycles ovnsb_db_run():\t%10ld\n", (end - start));
+        VLOG_WARN("Done ovnsb_db_run\n");
 
         start = rdtsc();
         unixctl_server_run(unixctl);
