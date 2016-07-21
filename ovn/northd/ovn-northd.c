@@ -588,15 +588,15 @@ join_logical_ports(struct northd_context *ctx,
 
     const struct sbrec_port_binding *sb;
     count = 0;
-    start = rdtsc();
+    // start = rdtsc();
     SBREC_PORT_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
         struct ovn_port *op = ovn_port_create(ports, sb->logical_port,
                                               NULL, NULL, sb);
         ovs_list_push_back(sb_only, &op->list);
         count++;
     }
-    t_build_ports = rdtsc() - start;
-    VLOG_INFO("Allocated ports time:,\t%d,%16ld,\n", count, t_build_ports);
+    // t_build_ports = rdtsc() - start;
+    // VLOG_WARN("Allocated ports time:,\t%d,%16ld,\n", count, t_build_ports);
 
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
@@ -822,18 +822,12 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                         op->od->port_key_hint = op->sb_tnl_key;
                     }
                 } else {
-                    VLOG_INFO("\t\t----> Not found in both list\n");
                     op = ovn_port_find(&sb_only_ports, nbs->name);
                     if (op) {
                     } else {
                         /* Create a new entry in the nb_only list */
                         op = ovn_port_create(&nb_only_ports, nbs->name, nbs, NULL, NULL);
                         ovs_list_push_back(&nb_only, &op->list);
-
-                        if (!op->up || !*op->up) {
-                            VLOG_INFO("\t\t----> op up is initialized to false\n");
-                        }
-
                         // datapath assignment
                         op->od = od;
 
@@ -875,14 +869,10 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
         if (op->sb->tunnel_key > op->od->port_key_hint) {
          op->od->port_key_hint = op->sb->tunnel_key;
          }*/
-
-        VLOG_INFO("\t\t----> port key hint: %d\n", op->od->port_key_hint);
         uint16_t tunnel_key = ovn_port_allocate_key(op->od);
         if (!tunnel_key) {
-            VLOG_INFO("\t\t----> Not tunnel key; skip\n");
             continue;
         }
-        VLOG_INFO("\t\t----> tunnel_key: %d\n", tunnel_key);
 
         op->sb = sbrec_port_binding_insert(ctx->ovnsb_txn);
         ovn_port_update_sbrec(op);
@@ -895,8 +885,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
         ovs_list_push_back(both2, &op->list);
 
 	hmap_insert(ports2, &op->key_node, hash_string(op->key, 0));
-        VLOG_INFO("\t----> Inserted %s to both list\n", op->key);
-        VLOG_INFO("\t\t op point to sb lport: %s\n", op->sb->logical_port);
     }
 
     /* For each entry in the sb_only list, remove from the port_binding table */
@@ -926,15 +914,11 @@ build_ports(struct northd_context *ctx, struct hmap *datapaths,
     LIST_FOR_EACH_SAFE (op, next, list, &both) {
         ovn_port_update_sbrec(op);
 
-        VLOG_INFO("\t----> op sb tunnel %ld\n", op->sb->tunnel_key);
         add_tnlid(&op->od->port_tnlids, op->sb->tunnel_key);
-        VLOG_INFO("\t----> added op sb tunnel %ld\n", op->sb->tunnel_key);
 
         if (op->sb->tunnel_key > op->od->port_key_hint) {
-            VLOG_INFO("\t----> sb tunnel key: %ld\n", op->sb->tunnel_key);
             op->od->port_key_hint = op->sb->tunnel_key;
         }
-        VLOG_INFO("\t----> updated od port key_hint %d\n", op->od->port_key_hint);
     }
 
     /* Add southbound record for each unmatched northbound record. */
@@ -2423,7 +2407,6 @@ ovn_db_run(struct northd_context *ctx, struct hmap *ports2,
 {
     uint64_t start, t_build_ports;
     if (!ctx->ovnsb_txn) {
-        VLOG_INFO("No ctx of sb");
         return;
     }
 
@@ -2433,7 +2416,7 @@ ovn_db_run(struct northd_context *ctx, struct hmap *ports2,
     start = rdtsc();
     build_ports2(ctx, &datapaths, ports2, both2);
     t_build_ports = rdtsc() - start;
-    VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
+    VLOG_WARN("Cycle build_ports2():,\t%16ld,\n", t_build_ports);
 
     build_lflows(ctx, &datapaths, ports2);
 
@@ -2460,7 +2443,7 @@ ovnnb_db_run(struct northd_context *ctx)
     t_build_ports = rdtsc() - start;
     VLOG_WARN("Cycle build_ports():,\t%16ld,\n", t_build_ports);
     build_lflows(ctx, &datapaths, &ports);
-    VLOG_WARN("Done build_lflows\n");
+    VLOG_INFO("Done build_lflows\n");
 
     struct ovn_datapath *dp, *next_dp;
     HMAP_FOR_EACH_SAFE (dp, next_dp, key_node, &datapaths) {
