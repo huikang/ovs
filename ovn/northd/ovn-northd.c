@@ -775,9 +775,15 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
     const struct sbrec_port_binding *sb;
     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-        hash_node = xzalloc(sizeof *hash_node);
-        hash_node->sb = sb;
-        hmap_insert(&sb_hmap, &hash_node->node, hash_string(sb->logical_port, 0));
+        op = ovn_port_find(ports2, sb->logical_port);
+        if (op) {
+            op->sb = sb;
+            VLOG_INFO("----> Found %s\n", op->key);
+        } else {
+            hash_node = xzalloc(sizeof *hash_node);
+            hash_node->sb = sb;
+            hmap_insert(&sb_hmap, &hash_node->node, hash_string(sb->logical_port, 0));
+        }
     }
 
     /*
@@ -804,6 +810,7 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
                     /* since the port found the both list, setup nbs and sb for op */
                     op->nbs = nbs;
+                    if (!op->sb) {
                     HMAP_FOR_EACH_WITH_HASH(hash_node, node,
                                             hash_string(op->key, 0),
                                             &sb_hmap) {
@@ -812,7 +819,7 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                             break;
                         }
                     }
-
+                    }
 
                     op->od = od;
 
