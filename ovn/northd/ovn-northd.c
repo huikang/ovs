@@ -512,8 +512,6 @@ struct ovn_port {
     struct ovs_list list;       /* In list of similar records. */
 
     bool *up;                   /* set to True, if chassis is bounded */
-
-    uint32_t sb_tnl_key;
 };
 
 static struct ovn_port *
@@ -752,7 +750,7 @@ static void
 build_ports2(struct northd_context *ctx, struct hmap *datapaths,
              struct hmap *ports2, struct ovs_list *both2)
 {
-    struct hmap sb_only_ports, nb_only_ports, sb_hmap;
+    struct hmap sb_only_ports, nb_only_ports;
     struct ovs_list sb_only, nb_only;
     struct ovn_port *op, *next;
     ovs_list_init(&sb_only);
@@ -761,31 +759,27 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     hmap_init(&sb_only_ports);
     hmap_init(&nb_only_ports);
 
-    /* setup hash node for entry in the sb port_binding */
-    struct sb_hash_node {
-        struct hmap_node node;
-        const struct sbrec_port_binding *sb;
-    } *hash_node;
-
-    hmap_init(&sb_hmap);
-
+    /*
+     * For each entry in sb port_binding table
+     * - if found in both list; point op->sb to this entry
+     * - if not found in both list; create an op and push it in the sb_only list
+     */
     const struct sbrec_port_binding *sb;
     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
         op = ovn_port_find(ports2, sb->logical_port);
         if (op) {
             op->sb = sb;
         } else {
-            hash_node = xzalloc(sizeof *hash_node);
-            hash_node->sb = sb;
-            hmap_insert(&sb_hmap, &hash_node->node, hash_string(sb->logical_port, 0));
+            /* not found in both list, create op in sb_only_list */
+            op = ovn_port_create(&sb_only_ports, sb->logical_port, NULL, NULL, sb);
+            ovs_list_push_back(&sb_only, &op->list);
         }
     }
 
     /*
      * - For each port known via the nb db:
      *    - if the entry is found in the both list, update the nb data contained
-     *          in the entry, set lport state to "up", whch is store in
-     *          struct ovn_port
+     *          in the entry, set op->nbs to the entry
      *    - if the entry is not in the both list, but is in the sb_only
      *          list, move the entry from the sb_list to the both list
      *    - if the entry is not in either the both or the sb_only list,
@@ -800,60 +794,36 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
                 if (op) {
       	            /* since the port found the both list, setup nbs and sb for op */
                     op->nbs = nbs;
-                    if (!op->sb) {
-                    HMAP_FOR_EACH_WITH_HASH(hash_node, node,
-                                            hash_string(op->key, 0),
-                                            &sb_hmap) {
-                        if (!strcmp(op->key, hash_node->sb->logical_port)) {
-                            op->sb = hash_node->sb;
-                            break;
-                        }
-                    }
-                    }
-                    op->od = od;
-
-                    /*
-                     * NOTE: this op has already been added to datapth
-                     * must update the tnlid in od.
-                     * TODO: If datapath were persisted, this step is unnecessary
-                     */
-                    add_tnlid(&op->od->port_tnlids, op->sb_tnl_key);
-                    if (op->sb_tnl_key > op->od->port_key_hint) {
-                        op->od->port_key_hint = op->sb_tnl_key;
-                    }
                 } else {
                     op = ovn_port_find(&sb_only_ports, nbs->name);
                     if (op) {
+                        op->nbs = nbs;
+                        ovs_list_remove(&op->list);
+                        ovs_list_push_back(both2, &op->list);
                     } else {
                         /* Create a new entry in the nb_only list */
                         op = ovn_port_create(&nb_only_ports, nbs->name, nbs, NULL, NULL);
                         ovs_list_push_back(&nb_only, &op->list);
-                        // datapath assignment
-                        op->od = od;
-
 		    }
 		}
+                // datapath assignment
+                op->od = od;
             }
-        }
+        } else {
+	}
     }
 
     /*
      * For each entry in the both list, do modifications to align the port
      * binding with nb information. (only for those change in nb scanning)
      */
-    /*
-    VLOG_INFO("----> Align port binding with nb\n");
     LIST_FOR_EACH_SAFE (op, next, list, both2) {
-        VLOG_INFO("\t\t----> Checking port %s\n", op->key);
-        if (!op->sb) {
-            VLOG_INFO("\t\t----> no sb port_binding assigned");
-        }
-        // ovn_port_update_sbrec(op);
-        // add_tnlid(&op->od->port_tnlids, op->sb->tunnel_key);
+
+        add_tnlid(&op->od->port_tnlids, op->sb->tunnel_key);
         if (op->sb->tunnel_key > op->od->port_key_hint) {
             op->od->port_key_hint = op->sb->tunnel_key;
-        }*/
-    // }*/
+        }
+    }
 
     /*
      * For each entry in the nb_only list, create port_binding information the
@@ -862,13 +832,6 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     // VLOG_INFO("----> Add mismatched northbound record to sb port_binding "
     //          "and add to both list\n");
     LIST_FOR_EACH_SAFE (op, next, list, &nb_only) {
-        // VLOG_INFO("\t----> Insert nb port %s\n", op->key);
-
-        /*
-        add_tnlid(&op->od->port_tnlids, op->sb->tunnel_key);
-        if (op->sb->tunnel_key > op->od->port_key_hint) {
-         op->od->port_key_hint = op->sb->tunnel_key;
-         }*/
         uint16_t tunnel_key = ovn_port_allocate_key(op->od);
         if (!tunnel_key) {
             continue;
@@ -879,7 +842,7 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
 
         sbrec_port_binding_set_logical_port(op->sb, op->key);
         sbrec_port_binding_set_tunnel_key(op->sb, tunnel_key);
-        op->sb_tnl_key = tunnel_key;
+        // op->sb_tnl_key = tunnel_key;
 
         ovs_list_remove(&op->list);
         ovs_list_push_back(both2, &op->list);
@@ -888,10 +851,11 @@ build_ports2(struct northd_context *ctx, struct hmap *datapaths,
     }
 
     /* For each entry in the sb_only list, remove from the port_binding table */
+    /*
     HMAP_FOR_EACH_POP(hash_node, node, &sb_hmap) {
         free(hash_node);
     }
-    hmap_destroy(&sb_hmap);
+    hmap_destroy(&sb_hmap); */
 }
 
 /* Updates the southbound Port_Binding table so that it contains the logical
