@@ -69,6 +69,8 @@ gets cleared.  It is harmless to run it again in any case.)
 $LOCAL_IP in the below command is the IP address via which other hosts
 can reach this host.  This acts as your local tunnel endpoint.
 
+$SYSTEM_ID in the below command is the unique identifier for the docker host.
+
 $ENCAP_TYPE is the type of tunnel that you would like to use for overlay
 networking.  The options are "geneve" or "stt".  (Please note that your
 kernel should have support for your chosen $ENCAP_TYPE.  Both geneve
@@ -79,8 +81,10 @@ support in upstream Linux.  You can verify whether you have the support in your
 kernel by doing a "lsmod | grep $ENCAP_TYPE".)
 
 ```
-ovs-vsctl set Open_vSwitch . external_ids:ovn-remote="tcp:$CENTRAL_IP:6642" \
-  external_ids:ovn-nb="tcp:$CENTRAL_IP:6641" external_ids:ovn-encap-ip=$LOCAL_IP external_ids:ovn-encap-type="$ENCAP_TYPE"
+ovs-vsctl set Open_vSwitch . external-ids:system-id=$SYSTEM_ID \
+  external_ids:ovn-remote="tcp:$CENTRAL_IP:6642" \
+  external_ids:ovn-nb="tcp:$CENTRAL_IP:6641" \
+  external_ids:ovn-encap-ip=$LOCAL_IP external_ids:ovn-encap-type="$ENCAP_TYPE"
 ```
 
 And finally, start the ovn-controller.  (You need to run the below command
